@@ -329,6 +329,8 @@ The script handles the same failure modes the per-cloud teardown scripts in the 
 
 It also runs `cilium clustermesh disable` on each cluster before destroying so the public clustermesh-apiserver Services don't leak orphan cloud LBs.
 
+**AWS gotcha**: the cilium clustermesh-apiserver Service `type=LoadBalancer` provisions *classic* ELBs (ELBv1) on EKS, not NLBs. `aws elbv2 describe-load-balancers` does not return them, so the AWS sweep explicitly enumerates ELBv1 and deletes any tagged `kubernetes.io/cluster/*`. The associated `k8s-elb-*` security groups also stick around and block VPC delete; the sweep catches those too. If you see `terraform destroy` looping on `DependencyViolation` for a VPC, look for leftover ELBv1s with `aws elb describe-load-balancers --region us-east-1` and delete them by name.
+
 ## Troubleshooting
 
 ### Nodes stay `NotReady` after Cilium install
