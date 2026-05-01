@@ -87,3 +87,13 @@ variable "vpn_gcp_asn" {
   type        = number
   default     = 64513
 }
+
+# CIDRs of the peer clouds (AWS VPC + Azure VNet by default). Allowed
+# in the intra_vpc firewall so traffic arriving via the VPN tunnel is
+# accepted by GCP nodes. Match the defaults of aws/terraform's
+# var.vpc_cidr and azure/terraform's var.vnet_cidr.
+variable "peer_cloud_cidrs" {
+  description = "Source CIDRs for VPN-routed peer cloud traffic."
+  type        = list(string)
+  default     = ["10.10.0.0/16", "10.30.0.0/16"]
+}

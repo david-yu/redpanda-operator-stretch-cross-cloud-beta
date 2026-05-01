@@ -50,15 +50,20 @@ resource "google_compute_firewall" "cross_cloud_udp" {
   target_tags   = ["${var.cluster_name}-node"]
 }
 
-# GKE master ↔ node ↔ pod intra-VPC traffic. GKE creates its own rules but
-# we also need pod-CIDR ↔ pod-CIDR within the VPC for Cilium tunnels.
+# Intra-cluster + cross-cloud-via-VPN traffic. Cilium tunnels need pod
+# CIDR <-> pod CIDR within the VPC; the VPN-routed peer cloud CIDRs
+# (AWS VPC + Azure VNet) need ICMP/TCP/UDP allowed since traffic
+# arriving via the VPN tunnel still hits this VPC firewall.
 resource "google_compute_firewall" "intra_vpc" {
   name        = "${var.cluster_name}-intra-vpc"
   network     = google_compute_network.this.name
-  description = "intra-VPC traffic for cilium tunnels"
+  description = "intra-VPC + cross-cloud-via-VPN traffic"
 
   allow { protocol = "tcp" }
   allow { protocol = "udp" }
   allow { protocol = "icmp" }
-  source_ranges = [var.subnet_cidr, var.pod_cidr, var.service_cidr]
+  source_ranges = concat(
+    [var.subnet_cidr, var.pod_cidr, var.service_cidr],
+    var.peer_cloud_cidrs,
+  )
 }

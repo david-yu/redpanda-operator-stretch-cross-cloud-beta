@@ -101,3 +101,17 @@ resource "aws_security_group_rule" "cross_cloud_udp" {
   security_group_id = module.eks.node_security_group_id
   description       = "cross-cloud cilium wireguard/vxlan udp/${each.value}"
 }
+
+# Allow ALL traffic (incl. ICMP) from peer cloud CIDRs that arrive via
+# the VPN. Keeps the cross-cloud ping path open for k8s-style health
+# checks and Cilium's underlay tunnel traffic.
+resource "aws_security_group_rule" "peer_cloud_all" {
+  for_each          = toset(var.peer_cloud_cidrs)
+  type              = "ingress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = [each.value]
+  security_group_id = module.eks.node_security_group_id
+  description       = "all from peer cloud CIDR (VPN-routed) ${each.value}"
+}

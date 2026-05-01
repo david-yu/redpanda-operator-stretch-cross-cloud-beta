@@ -99,3 +99,9 @@ variable "vpn_aws_asn" {
   type        = number
   default     = 64512
 }
+
+variable "peer_cloud_cidrs" {
+  description = "CIDRs of the peer clouds (GCP subnet + Azure VNet). Allowed inbound on the EKS node SG so traffic arriving via the VPN tunnel reaches the nodes. Match gcp/terraform's var.subnet_cidr and azure/terraform's var.vnet_cidr."
+  type        = list(string)
+  default     = ["10.20.0.0/16", "10.30.0.0/16"]
+}
