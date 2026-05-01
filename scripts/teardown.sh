@@ -177,6 +177,60 @@ for ctx in "${CONTEXTS[@]}"; do force_finalize_ns  "$ctx"; done
 log "=== disable clustermesh on each cluster ==="
 for ctx in "${CONTEXTS[@]}"; do clustermesh_disable "$ctx"; done
 
+# IMPORTANT ordering: vpn/terraform must destroy BEFORE the per-cloud
+# stacks. The VPN module holds the
+# azurerm_virtual_network_gateway_connection (and AWS customer_gateway,
+# GCP vpn_tunnel) resources that reference the per-cloud gateways.
+# If azure/terraform destroys first, the AKS-side gateway can't go
+# because Azure refuses to delete a Virtual Network Gateway that's
+# still attached to an active connection. Same logical issue on
+# AWS/GCP — the VPN-module connections reference the per-cloud
+# gateways.
+#
+# vpn/terraform takes per-cloud outputs as -var inputs. Pull them from
+# the still-applied per-cloud state files. If any per-cloud state is
+# already empty (e.g. partial teardown re-run), the values come back
+# as empty strings and `terraform destroy` does an early no-op for
+# resources that can't be refreshed — which is fine.
+log "=== terraform destroy vpn/terraform first (deletes connections / tunnels / customer_gateways) ==="
+AWS_VPC_ID=$(cd "$REPO_ROOT/aws/terraform" && terraform output -raw vpc_id 2>/dev/null || echo "")
+AWS_VGW_ID=$(cd "$REPO_ROOT/aws/terraform" && terraform output -raw vpn_gateway_id 2>/dev/null || echo "")
+AWS_RT_IDS_JSON=$(cd "$REPO_ROOT/aws/terraform" && terraform output -json public_route_table_ids 2>/dev/null || echo '[]')
+GCP_NETWORK=$(cd "$REPO_ROOT/gcp/terraform" && terraform output -raw network_name 2>/dev/null || echo "")
+GCP_ROUTER=$(cd "$REPO_ROOT/gcp/terraform" && terraform output -raw router_name 2>/dev/null || echo "")
+GCP_HA_VPN_GW=$(cd "$REPO_ROOT/gcp/terraform" && terraform output -raw ha_vpn_gateway_self_link 2>/dev/null || echo "")
+GCP_HA_IP_A=$(cd "$REPO_ROOT/gcp/terraform" && terraform output -raw ha_vpn_gateway_ip_a 2>/dev/null || echo "")
+GCP_HA_IP_B=$(cd "$REPO_ROOT/gcp/terraform" && terraform output -raw ha_vpn_gateway_ip_b 2>/dev/null || echo "")
+AZ_RG=$(cd "$REPO_ROOT/azure/terraform" && terraform output -raw resource_group 2>/dev/null || echo "")
+AZ_VPN_GW_ID=$(cd "$REPO_ROOT/azure/terraform" && terraform output -raw vpn_gateway_id 2>/dev/null || echo "")
+AZ_VPN_PIP=$(cd "$REPO_ROOT/azure/terraform" && terraform output -raw vpn_gateway_public_ip 2>/dev/null || echo "")
+AZ_VPN_BGP_IP=$(cd "$REPO_ROOT/azure/terraform" && terraform output -raw vpn_gateway_bgp_peering_address 2>/dev/null || echo "")
+
+pushd "$REPO_ROOT/vpn/terraform" >/dev/null
+terraform init -upgrade >/dev/null 2>&1 || true
+terraform destroy -auto-approve \
+  -var "aws_region=us-east-1" \
+  -var "aws_vpc_id=$AWS_VPC_ID" \
+  -var "aws_vpc_cidr=10.10.0.0/16" \
+  -var "aws_route_table_ids=$AWS_RT_IDS_JSON" \
+  -var "aws_vpn_gateway_id=$AWS_VGW_ID" \
+  -var "gcp_project_id=$GCP_PROJECT" \
+  -var "gcp_region=us-east1" \
+  -var "gcp_network_name=$GCP_NETWORK" \
+  -var "gcp_subnet_cidr=10.20.0.0/16" \
+  -var "gcp_router_name=$GCP_ROUTER" \
+  -var "gcp_ha_vpn_gateway_self_link=$GCP_HA_VPN_GW" \
+  -var "gcp_ha_vpn_gateway_ip_a=$GCP_HA_IP_A" \
+  -var "gcp_ha_vpn_gateway_ip_b=$GCP_HA_IP_B" \
+  -var "azure_resource_group_name=$AZ_RG" \
+  -var "azure_location=eastus" \
+  -var "azure_vnet_cidr=10.30.0.0/16" \
+  -var "azure_vpn_gateway_id=$AZ_VPN_GW_ID" \
+  -var "azure_vpn_gateway_public_ip=$AZ_VPN_PIP" \
+  -var "azure_vpn_gateway_bgp_peering_address=$AZ_VPN_BGP_IP" \
+  2>&1 | tail -5 | sed 's/^/  /'
+popd >/dev/null
+
 log "=== terraform destroy each cloud ==="
 tf_state_rm_k8s "$REPO_ROOT/aws/terraform"
 tf_destroy      "$REPO_ROOT/aws/terraform"
