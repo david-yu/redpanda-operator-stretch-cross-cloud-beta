@@ -1,0 +1,39 @@
+apiVersion: cluster.redpanda.com/v1alpha2
+kind: StretchCluster
+metadata:
+  name: redpanda
+  namespace: redpanda
+spec:
+  rbac:
+    enabled: true
+  external:
+    enabled: false
+  # Flat cross-cluster networking: the operator manages headless Services
+  # and EndpointSlices pointing at peer-cluster broker pod IPs. With
+  # Cilium ClusterMesh providing the pod-IP routing layer, brokers in
+  # other clouds are reachable directly by their pod IPs from this cluster.
+  networking:
+    crossClusterMode: flat
+  # Rack awareness reads from a node ANNOTATION (not label). The bootstrap
+  # script applies `redpanda.com/cloud=azure` to every node in this cluster
+  # so the rack name is the cloud, not the Azure region — keeps
+  # default_leaders_preference readable across clouds.
+  rackAwareness:
+    enabled: true
+    nodeAnnotation: redpanda.com/cloud
+  tls:
+    enabled: true
+    certs:
+      default:
+        caEnabled: true
+  enterprise:
+    licenseSecretRef:
+      name: redpanda-license
+      key: license.key
+  config:
+    cluster:
+      default_leaders_preference: "racks:aws,gcp,azure"
+      partition_autobalancing_node_availability_timeout_sec: 30
+      partition_autobalancing_node_autodecommission_timeout_sec: 60
+      partition_autobalancing_mode: continuous
+      partition_autobalancing_max_disk_usage_percent: 80

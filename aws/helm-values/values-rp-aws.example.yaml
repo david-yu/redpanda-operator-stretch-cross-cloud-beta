@@ -1,0 +1,54 @@
+# Helm values for cluster rp-aws (cross-cloud stretch).
+#
+# Multicluster.peers is identical on every cluster; only fullnameOverride,
+# multicluster.name, and apiServerExternalAddress differ.
+#
+# Replace the <PLACEHOLDER> values before installing:
+#   - <RP_AWS_API_SERVER>:    EKS endpoint URL (https://...)
+#       aws eks describe-cluster --region us-east-1 --name rp-aws --query cluster.endpoint --output text
+#   - <RP_AWS_NLB_HOSTNAME>:  hostname of the rp-aws-multicluster-peer LoadBalancer
+#       kubectl --context rp-aws -n redpanda get svc rp-aws-multicluster-peer \
+#         -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+#   - <RP_GCP_API_SERVER>:    GKE endpoint (prefix `https://` and append `:443`)
+#       gcloud container clusters describe rp-gcp --region us-east1 --format 'value(endpoint)'
+#   - <RP_GCP_LB_IP>:         public IP of the rp-gcp-multicluster-peer LoadBalancer
+#       kubectl --context rp-gcp -n redpanda get svc rp-gcp-multicluster-peer \
+#         -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+#   - <RP_AZURE_API_SERVER>:  AKS FQDN (prefix `https://` and append `:443`)
+#       az aks show -g rp-aws-cross-cloud -n rp-azure --query fqdn -o tsv
+#   - <RP_AZURE_LB_IP>:       public IP of the rp-azure-multicluster-peer LoadBalancer
+#       kubectl --context rp-azure -n redpanda get svc rp-azure-multicluster-peer \
+#         -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+
+fullnameOverride: rp-aws
+
+enterprise:
+  licenseSecretRef:
+    name: redpanda-license
+    key: license.key
+
+crds:
+  enabled: true
+
+multicluster:
+  enabled: true
+  name: rp-aws
+  apiServerExternalAddress: <RP_AWS_API_SERVER>
+  peers:
+    - name: rp-aws
+      address: <RP_AWS_NLB_HOSTNAME>
+    - name: rp-gcp
+      address: <RP_GCP_LB_IP>
+    - name: rp-azure
+      address: <RP_AZURE_LB_IP>
+  service:
+    enabled: true
+
+statefulset:
+  replicas: 2
+
+# Operator-level PVCUnbinder. See docs/notes in the same-cloud beta for
+# full caveats; safe default for the demo, raise the timeout for production.
+additionalCmdFlags:
+  - --unbind-pvcs-after=120s
+  - --allow-pv-rebinding

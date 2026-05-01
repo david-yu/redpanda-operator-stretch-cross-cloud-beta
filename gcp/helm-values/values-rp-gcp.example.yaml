@@ -1,0 +1,34 @@
+# Helm values for cluster rp-gcp (cross-cloud stretch). See
+# aws/helm-values/values-rp-aws.example.yaml for the placeholder lookup
+# commands — the multicluster.peers block here is identical.
+
+fullnameOverride: rp-gcp
+
+enterprise:
+  licenseSecretRef:
+    name: redpanda-license
+    key: license.key
+
+crds:
+  enabled: true
+
+multicluster:
+  enabled: true
+  name: rp-gcp
+  apiServerExternalAddress: <RP_GCP_API_SERVER>
+  peers:
+    - name: rp-aws
+      address: <RP_AWS_NLB_HOSTNAME>
+    - name: rp-gcp
+      address: <RP_GCP_LB_IP>
+    - name: rp-azure
+      address: <RP_AZURE_LB_IP>
+  service:
+    enabled: true
+
+statefulset:
+  replicas: 2
+
+additionalCmdFlags:
+  - --unbind-pvcs-after=120s
+  - --allow-pv-rebinding

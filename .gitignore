@@ -1,0 +1,28 @@
+# Never commit licenses, kubeconfigs, or rendered values with real endpoints.
+*.license
+*.key
+kubeconfig*
+values-rp-aws.yaml
+values-rp-gcp.yaml
+values-rp-azure.yaml
+clustermesh-apiserver-ca.crt
+*.kubeconfig
+
+# Local logs / scratch
+*.log
+*.bak
+.DS_Store
+
+# Terraform local state and provider cache
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

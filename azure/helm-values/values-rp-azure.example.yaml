@@ -1,0 +1,36 @@
+# Helm values for cluster rp-azure (cross-cloud stretch). See
+# aws/helm-values/values-rp-aws.example.yaml for the placeholder lookup
+# commands — the multicluster.peers block here is identical.
+
+fullnameOverride: rp-azure
+
+enterprise:
+  licenseSecretRef:
+    name: redpanda-license
+    key: license.key
+
+crds:
+  enabled: true
+
+multicluster:
+  enabled: true
+  name: rp-azure
+  apiServerExternalAddress: <RP_AZURE_API_SERVER>
+  peers:
+    - name: rp-aws
+      address: <RP_AWS_NLB_HOSTNAME>
+    - name: rp-gcp
+      address: <RP_GCP_LB_IP>
+    - name: rp-azure
+      address: <RP_AZURE_LB_IP>
+  service:
+    enabled: true
+
+# 2/2/1 layout: 1 broker in azure (the lighter rack — gives RF=5 quorum
+# tolerance for losing any single cloud).
+statefulset:
+  replicas: 1
+
+additionalCmdFlags:
+  - --unbind-pvcs-after=120s
+  - --allow-pv-rebinding
