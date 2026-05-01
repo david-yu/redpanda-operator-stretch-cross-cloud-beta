@@ -32,12 +32,16 @@ spec:
       key: license.key
   config:
     cluster:
-      # Ordered leader pinning across the three clouds. Fall-through order
-      # picks the next cloud in line when the preferred rack's brokers are
-      # unreachable; with 2/2/1 (aws/gcp/azure) and RF=5, this list also
-      # determines where the controller (`redpanda/controller/0`) prefers
-      # to live — keep the lowest-RTT cloud first.
-      default_leaders_preference: "racks:aws,gcp,azure"
+      # Pin leaders (and controller) to the AWS rack. NOTE: when multiple
+      # racks are listed, Redpanda distributes leaders *equally* across
+      # them (per cluster-properties docs) — there is NO priority
+      # fallback. So a single-rack value is what actually pins leaders;
+      # listing all three clouds spreads leadership 1/3 to each which
+      # adds cross-cloud egress for every produce. For our triple,
+      # us-east-1 (aws) has the lowest sum-of-pairwise-RTT to us-east1
+      # (gcp ~12ms) and eastus (azure ~5ms), so it's also the safest
+      # rack to keep the controller in.
+      default_leaders_preference: "racks:aws"
       # Demo-friendly autobalancer timeouts. Production: raise both
       # substantially (Redpanda's defaults are 900 / 600).
       partition_autobalancing_node_availability_timeout_sec: 30

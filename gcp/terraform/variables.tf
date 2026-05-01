@@ -81,3 +81,9 @@ variable "cross_cloud_udp_ports" {
   type        = list(number)
   default     = [51871, 8472]
 }
+
+variable "vpn_gcp_asn" {
+  description = "BGP ASN for the GCP Cloud Router. Must be distinct from aws / azure ASNs."
+  type        = number
+  default     = 64513
+}

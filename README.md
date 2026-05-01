@@ -1,16 +1,16 @@
-# Redpanda Stretch Cluster Across AWS / GCP / Azure with Cilium ClusterMesh
+# Redpanda Stretch Cluster Across AWS / GCP / Azure with Cilium ClusterMesh + Site-to-Site VPN
 
-Validation scaffold for a Redpanda Operator v26.2.1+ StretchCluster that **spans three different cloud providers** — one Kubernetes cluster on each of AWS EKS, GCP GKE, and Azure AKS, connected into a single Cilium ClusterMesh that gives Redpanda flat pod-to-pod connectivity across the WAN.
+Validation scaffold for a Redpanda Operator v26.2.1+ StretchCluster that **spans three different cloud providers** — one Kubernetes cluster on each of AWS EKS, GCP GKE, and Azure AKS, connected into a single Cilium ClusterMesh.
 
-Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (single-cloud, three-region). Where the same-cloud beta uses the cloud's native L3 mesh (AWS TGW, GCP global VPC, Azure VNet peering), this repo uses **Cilium ClusterMesh + WireGuard transparent encryption over the public internet**, so it works across cloud-provider boundaries with no SD-WAN or VPN tier in the middle.
+Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (single-cloud, three-region). Where the same-cloud beta uses the cloud's native L3 mesh (AWS TGW, GCP global VPC, Azure VNet peering), this repo uses **a 3-way mesh of site-to-site IPsec VPNs (BGP-routed) + Cilium ClusterMesh on top**, so node InternalIPs are routable across cloud boundaries and Cilium's clustermesh data plane works without modification.
 
-> [!WARNING]
-> **Blocked by two open upstream Cilium issues for cross-cloud clustermesh.** Validation pass on 2026-05-01 brought up all three clusters and installed Cilium successfully; Cluster Mesh `connect` succeeded for the AWS↔GCP pair at the control-plane level. **However, pod-to-pod data plane fails across clouds** because Cilium has known bugs in this exact configuration:
+> [!NOTE]
+> **Why the VPN tier?** First validation pass (without VPN, public-internet pod traffic + Cilium WireGuard nodeEncryption) hit two open upstream Cilium issues that prevent the data plane from establishing:
 >
-> - **[cilium#24403](https://github.com/cilium/cilium/issues/24403)** (open CFP) — Cilium picks the node `InternalIP` for cluster-mesh tunnel endpoints, but cross-cloud nodes are only mutually reachable via `ExternalIP`. AWS pods try to send Geneve-encapsulated traffic to GCP nodes' `10.20.x.x` (private), which doesn't route across the WAN.
-> - **[cilium#31209](https://github.com/cilium/cilium/issues/31209)** (open) — When Tunneling + KubeProxyReplacement + WireGuard nodeEncryption are all enabled (our config), the initial clustermesh-apiserver connection establishment can fail asymmetrically: forward packets route natively but return packets get tunneled+encrypted with a key the destination hasn't received yet.
+> - **[cilium#24403](https://github.com/cilium/cilium/issues/24403)** — Cilium picks node `InternalIP` for clustermesh tunnel endpoints, but cross-cloud nodes are only reachable via `ExternalIP` without a VPN. AWS pods try to send traffic to GCP nodes' private `10.20.x.x`, which doesn't route across the WAN.
+> - **[cilium#31209](https://github.com/cilium/cilium/issues/31209)** — Tunnel + KubeProxyReplacement + WireGuard nodeEncryption combination causes asymmetric initial-connect routing.
 >
-> **Until those land, cross-cloud Cilium ClusterMesh requires either a site-to-site VPN/SD-WAN (so InternalIPs route across clouds) or a patched Cilium build.** This scaffold is honest about that — useful for understanding the topology and as a base to build the VPN tier on, but not a working stretch cluster as-is.
+> A site-to-site VPN tier sidesteps both: InternalIPs become mutually routable across clouds (fixes #24403), and we drop WireGuard nodeEncryption since IPsec already encrypts the underlay (fixes #31209). The VPN's per-month cost (~$300-$500 idle for the 3 gateways) is well worth not maintaining a Cilium fork.
 
 ## How it differs from the same-cloud beta
 
@@ -19,7 +19,7 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 | Topology | 3 regions × 1 cloud | 3 clouds × 1 region each |
 | K8s clusters | 3 EKS / 3 GKE / 3 AKS | 1 EKS + 1 GKE + 1 AKS |
 | CNI | Cloud default (AWS VPC CNI, GKE Dataplane V2, Azure CNI) | **Cilium** (replacing each cloud's default) |
-| L3 mesh | AWS TGW / GCP global VPC / Azure VNet peering | **Cilium ClusterMesh** over public internet, WireGuard-encrypted node-to-node |
+| L3 mesh | AWS TGW / GCP global VPC / Azure VNet peering | **Site-to-site IPsec VPN** (3-way mesh, BGP-routed) + **Cilium ClusterMesh** on top |
 | Cross-cluster service discovery | Operator's `crossClusterMode: flat` (manages headless Services + EndpointSlices) | Same — Cilium provides the pod-IP routing layer underneath |
 | Operator-to-operator raft | Public NLB / internal LB per cluster, port 9443 | Same |
 | Broker count | 2/2/1 = 5 (RF=5) | 2/2/1 = 5 (RF=5) |
@@ -27,51 +27,55 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 ## Architecture
 
 ```
-                   ┌───────────────── public internet ─────────────────┐
-                   │  WireGuard-encrypted node-to-node Cilium tunnels  │
-                   │  + mTLS clustermesh-apiserver (port 2379)         │
-                   └───────────────────────────────────────────────────┘
+   ┌───────── 3-way mesh of site-to-site IPsec VPN tunnels (BGP-routed) ─────────┐
+   │     - aws_vpn_gateway   ↔ google_compute_ha_vpn_gateway   ↔ azurerm_vpn_gw  │
+   │     - VPC / VNet CIDRs propagated as BGP routes between every pair          │
+   │     - InternalIP-to-InternalIP across clouds → routable                     │
+   └─────────────────────────────────────────────────────────────────────────────┘
                                     ▲           ▲           ▲
                                     │           │           │
    ┌────────── AWS us-east-1 ──────┴┐  ┌── GCP us-east1 ──┴┐  ┌── Azure eastus ──┴┐
    │ EKS: rp-aws         cluster.id=1│  │ GKE: rp-gcp       │  │ AKS: rp-azure     │
    │   • CNI: Cilium (no aws-vpc-cni)│  │   • CNI: Cilium   │  │   • CNI: Cilium   │
    │   • pod CIDR 10.110.0.0/16     │  │   (no DPv2)        │  │   (BYOCNI)        │
-   │   • 2× m5.xlarge nodes (public)│  │   • pod 10.120/16  │  │   • pod 10.130/16 │
-   │   • 2 broker pods (rack=aws)   │  │   • 2× n2-std-4    │  │   • 1× D4s_v5     │
-   └─────────────────────────────────┘  │   • 2 brokers      │  │   • 1 broker      │
-                                        │     (rack=gcp)     │  │     (rack=azure)  │
+   │   • VPC 10.10.0.0/16            │  │   • VPC 10.20.0/16 │  │   • VNet 10.30/16 │
+   │   • 2× m5.xlarge nodes          │  │   • 2× n2-std-4    │  │   • 2× D4s_v5     │
+   │   • 2 broker pods (rack=aws)    │  │   • 2 brokers      │  │   • 1 broker      │
+   └─────────────────────────────────┘  │     (rack=gcp)     │  │     (rack=azure)  │
                                         └────────────────────┘  └───────────────────┘
                        brokers, 2 / 2 / 1 — RF=5 quorum survives any single cloud loss
 ```
 
 Each cluster runs Cilium with:
 - `kubeProxyReplacement=true` — eBPF replaces kube-proxy entirely
-- `routingMode=tunnel`, `tunnelProtocol=geneve` — pod-to-pod over Geneve
-- `encryption.enabled=true`, `encryption.type=wireguard`, `encryption.nodeEncryption=true` — every node-to-node packet WireGuard-encrypted
+- `routingMode=tunnel`, `tunnelProtocol=geneve` — pod-to-pod over Geneve, encapsulated to peer node InternalIPs
+- **No** `encryption.nodeEncryption=true` — the underlying VPN already IPsec-encrypts the traffic, and the WireGuard combo triggers cilium#31209 in this exact config
 - `clustermesh-apiserver` exposed via `Service: type=LoadBalancer` per cluster, mTLS-secured
 
-The Redpanda multicluster operator runs in flat networking mode and creates per-peer headless Services + EndpointSlices on each cluster. Brokers reach peer brokers via cross-cluster pod IPs, which Cilium routes through the WireGuard mesh.
+The Redpanda multicluster operator runs in flat networking mode and creates per-peer headless Services + EndpointSlices on each cluster. Brokers reach peer brokers via cross-cluster pod IPs, which Cilium encapsulates over peer node InternalIPs — and those InternalIPs are routable thanks to the VPN BGP mesh.
 
 ## Repo layout
 
 ```
 .
 ├── aws/
-│   ├── terraform/              # EKS without aws-vpc-cni addon
+│   ├── terraform/              # EKS without aws-vpc-cni addon + aws_vpn_gateway
 │   ├── manifests/              # StretchCluster CR
 │   └── helm-values/            # values-rp-aws.example.yaml
 ├── gcp/
-│   ├── terraform/              # GKE without DPv2 / network policy
+│   ├── terraform/              # GKE without DPv2 + ha_vpn_gateway + cloud router
 │   ├── manifests/
 │   └── helm-values/
 ├── azure/
-│   ├── terraform/              # AKS BYOCNI (network_plugin=none)
+│   ├── terraform/              # AKS BYOCNI + virtual_network_gateway (VPN GW)
 │   ├── manifests/
 │   └── helm-values/
+├── vpn/
+│   └── terraform/              # 3-way mesh of IPsec tunnels + BGP peers (multi-cloud TF root)
 └── scripts/
     ├── install-cilium.sh       # per-cloud Cilium install
     ├── connect-mesh.sh         # enable + connect 3-way Cilium ClusterMesh
+    ├── apply-vpn.sh            # collects per-cloud TF outputs and applies vpn/terraform
     ├── bootstrap-redpanda.sh   # cert-manager + license secret + node annotations
     └── teardown.sh             # full multi-cloud teardown
 ```
@@ -86,33 +90,73 @@ The Redpanda multicluster operator runs in flat networking mode and creates per-
 
 ## Step-by-step
 
-### 1. Bring up the three clusters
+The flow is:
 
-Each cloud's Terraform brings up a Kubernetes cluster with **no CNI installed**. Nodes report `NotReady` until you install Cilium in step 2 — that's expected.
+1. **Apply per-cloud Terraform** (clusters + VPN gateways). VPN gateway creation alone is slow on Azure (~30-45 min for `azurerm_virtual_network_gateway`), so kick off all three in parallel.
+2. **Apply `vpn/terraform/`** — wires the 3-way mesh of IPsec tunnels with BGP. Reads each cloud's outputs.
+3. **Verify VPN connectivity** — node-internal-IP pings cross-cloud should succeed.
+4. **Install Cilium** on each cluster.
+5. **Connect Cilium ClusterMesh** between the three clusters.
+6. **Bootstrap Redpanda** (cert-manager, license secret, node annotations).
+7. **Install operator + StretchCluster** with peer LB lookups.
+
+### 1. Bring up the three clusters + VPN gateways
+
+Each cloud's Terraform brings up a Kubernetes cluster with **no CNI installed** plus the cloud's VPN gateway (no peer connections yet — those come from `vpn/terraform/` in step 2). Nodes report `NotReady` until you install Cilium in step 4 — that's expected.
 
 ```bash
-# AWS
+# AWS — ~12-15 min for EKS + VGW
 cd aws/terraform
 terraform init
 terraform apply
 # (record the kubectl_setup_command output and run it)
 
-# GCP — needs your project ID
+# GCP — ~10-15 min for GKE + HA VPN
 cd ../../gcp/terraform
 terraform init
 terraform apply -var project_id=<your-gcp-project>
 # (record + run kubectl_setup_command)
 
-# Azure
+# Azure — ~5 min for AKS, then ~30-45 min for VPN GW (azurerm_virtual_network_gateway is just slow)
 cd ../../azure/terraform
 terraform init
 terraform apply
 # (record + run kubectl_setup_command)
 ```
 
-After all three apply, your kubeconfig has contexts `rp-aws`, `rp-gcp`, `rp-azure`. `kubectl --context rp-aws get nodes` should show nodes `NotReady` — that means kubelet is up and the only thing missing is the CNI.
+Run all three in parallel terminals if you want to save time — they have no dependency on each other yet.
 
-### 2. Install Cilium on each cluster
+### 2. Wire the cross-cloud IPsec VPN mesh
+
+```bash
+./scripts/apply-vpn.sh
+```
+
+This collects per-cloud TF outputs (VGW IDs, HA VPN IPs, Azure VPN GW public IP, ASNs, route table IDs, etc.) and applies `vpn/terraform/` which:
+
+- Generates 3 IPsec PSKs (one per pair, persisted in the VPN module's TF state)
+- AWS side: `aws_customer_gateway` and `aws_vpn_connection` for each peer (GCP, Azure); enables BGP route propagation back into the AWS VPC route tables.
+- GCP side: `google_compute_external_vpn_gateway` and `google_compute_vpn_tunnel` to each peer (AWS, Azure); BGP peer config on the existing Cloud Router.
+- Azure side: `azurerm_local_network_gateway` and `azurerm_virtual_network_gateway_connection` to each peer (AWS, GCP).
+
+After this completes, BGP advertises:
+- AWS VPC CIDR (`10.10.0.0/16`) is reachable from GCP and Azure
+- GCP subnet CIDR (`10.20.0.0/16`) is reachable from AWS and Azure
+- Azure VNet CIDR (`10.30.0.0/16`) is reachable from AWS and GCP
+
+### 3. Verify VPN connectivity
+
+From a hostNetwork pod on rp-aws, ping a node InternalIP on rp-gcp:
+
+```bash
+gcp_node_internal_ip=$(kubectl --context rp-gcp get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+kubectl --context rp-aws run -i --rm test --image=alpine:3.20 --restart=Never --overrides='{"spec":{"hostNetwork":true}}' -- \
+  sh -c "apk add -q iputils 2>/dev/null; ping -c 3 -W 5 $gcp_node_internal_ip"
+```
+
+If this succeeds, the VPN tier is healthy. If it times out, BGP routes haven't propagated yet (normal for the first ~30s after `apply-vpn.sh`) or there's an IPsec tunnel issue (`aws ec2 describe-vpn-connections` and `gcloud compute vpn-tunnels list`).
+
+### 4. Install Cilium on each cluster
 
 ```bash
 ./scripts/install-cilium.sh all
@@ -121,14 +165,14 @@ After all three apply, your kubeconfig has contexts `rp-aws`, `rp-gcp`, `rp-azur
 This runs three `cilium install` invocations with cloud-specific flags:
 
 - **AWS** — `eni.enabled=false`, `ipam.mode=cluster-pool`, pod CIDR `10.110.0.0/16`. Cilium owns IP allocation entirely; AWS VPC CNI is never installed.
-- **GCP** — `gke.enabled=true`, `ipam.mode=kubernetes`. Cilium uses GKE's per-node `spec.podCIDR` (each node gets a /24 from the pods secondary range).
+- **GCP** — `ipam.mode=kubernetes`. Cilium uses GKE's per-node `spec.podCIDR` (each node gets a /24 from the pods secondary range). NB the script temporarily renames the kube-context back to its original `gke_<project>_<region>_rp-gcp` form because cilium-cli derives region/zone from the context name on GKE — see [Known issues](#known-issues).
 - **Azure** — `aksbyocni.enabled=true`, `ipam.mode=cluster-pool`, pod CIDR `10.130.0.0/16`. AKS came up with `--network-plugin none`, so Cilium installs into a fully empty CNI slot.
 
-All three set `kubeProxyReplacement=true` (eBPF replaces kube-proxy), `routingMode=tunnel` (Geneve), `encryption.type=wireguard` + `encryption.nodeEncryption=true` (every node-to-node packet WireGuard-encrypted on the public internet).
+All three set `kubeProxyReplacement=true` (eBPF replaces kube-proxy) and `routingMode=tunnel` (Geneve). We do **not** enable `encryption.nodeEncryption=wireguard` here — the underlying VPN already IPsec-encrypts traffic, and adding WireGuard on top triggers cilium#31209.
 
-After the script returns, `cilium status --kube-context rp-aws` should report `OK` and `kubectl --context rp-aws get nodes` should show all nodes `Ready`. Repeat for `rp-gcp` and `rp-azure`.
+After the script returns, `cilium status --context rp-aws` should report `OK` and `kubectl --context rp-aws get nodes` should show all nodes `Ready`. Repeat for `rp-gcp` and `rp-azure`.
 
-### 3. Wire the three clusters into a Cilium ClusterMesh
+### 5. Wire the three clusters into a Cilium ClusterMesh
 
 ```bash
 ./scripts/connect-mesh.sh all
@@ -136,10 +180,10 @@ After the script returns, `cilium status --kube-context rp-aws` should report `O
 
 This runs:
 1. `cilium clustermesh enable --service-type LoadBalancer` on each cluster (provisions a public LB for `clustermesh-apiserver` on port 2379, mTLS-secured)
-2. `cilium clustermesh connect` for each pair (aws↔gcp, aws↔azure, gcp↔azure)
+2. `cilium clustermesh connect --allow-mismatching-ca` for each pair (aws↔gcp, aws↔azure, gcp↔azure)
 3. `cilium clustermesh status` on each cluster
 
-Connectivity is established when `cilium clustermesh status` shows `2 / 2 remote clusters connected` on every cluster. Pod-to-pod traffic across clouds now flows through Cilium's WireGuard tunnels.
+Connectivity is established when `cilium clustermesh status` shows `2 / 2 remote clusters connected` on every cluster. Pod-to-pod traffic across clouds flows through Cilium's Geneve tunnel encapsulated to peer node InternalIPs (which are routable thanks to step 2's VPN mesh).
 
 To verify pod-IP routing across clouds:
 
@@ -148,7 +192,7 @@ kubectl --context rp-aws run -i --tty --rm test --image=nicolaka/netshoot --rest
   ping -c 3 <pod-IP-from-rp-gcp>
 ```
 
-### 4. Bootstrap Redpanda prerequisites
+### 6. Bootstrap Redpanda prerequisites
 
 ```bash
 ./scripts/bootstrap-redpanda.sh --license /path/to/redpanda.license
@@ -156,7 +200,7 @@ kubectl --context rp-aws run -i --tty --rm test --image=nicolaka/netshoot --rest
 
 This installs cert-manager on each cluster, annotates every node with `redpanda.com/cloud=<aws|gcp|azure>` (so the operator's rack awareness picks the right rack), and creates the `redpanda` namespace + `redpanda-license` secret.
 
-### 5. Install the operator + apply StretchCluster on each cluster
+### 7. Install the operator + apply StretchCluster on each cluster
 
 The operator's `multicluster.peers` block lists the public LB hostname/IP of every cluster's `<name>-multicluster-peer` Service plus each cluster's K8s API server endpoint — so this is a **two-pass install**:
 
@@ -225,7 +269,7 @@ for cloud in aws gcp azure; do
 done
 ```
 
-### 6. Validate
+### 8. Validate
 
 ```bash
 # Cluster health from any context:
@@ -250,21 +294,24 @@ kubectl --context rp-gcp -n redpanda exec -it redpanda-rp-gcp-0 -c redpanda -- \
 
 ## Cost
 
-This is **expensive** — cross-cloud egress dominates everything. Rough monthly estimate (`us-east-1` / `us-east1` / `eastus`):
+This is **expensive** — cross-cloud egress + the VPN tier add up fast. Rough estimate (`us-east-1` / `us-east1` / `eastus`):
 
 | Component | $/hr |
 |---|---|
 | EKS control plane | $0.10 |
 | 2× m5.xlarge | $0.38 |
+| AWS Site-to-Site VPN (2 connections × $0.05/hr) | $0.10 |
 | GKE regional control plane | $0.10 |
 | 3× n2-standard-4 (regional cluster, `node_count=1` × 3 zones) | $0.58 |
+| GCP HA VPN gateway (2 tunnels active × $0.05/hr) | ~$0.10 |
 | AKS control plane (free tier) | $0.00 |
 | 2× Standard_D4s_v5 | $0.38 |
+| Azure VPN Gateway (VpnGw1 sku) | $0.19 |
 | Cross-cloud LBs (3× NLB / Standard LB) | ~$0.07 |
 | Cilium clustermesh-apiserver LB (3 of) | ~$0.05 |
-| **Compute + LB subtotal** | **~$1.66/hr** |
+| **Compute + VPN + LB subtotal** | **~$2.05/hr** |
 
-On top: **inter-cloud egress**, which is the ~$0.05–$0.15 / GB tier on every provider. Even idle, broker-to-broker raft heartbeats + Cilium clustermesh-apiserver sync add up. Plan for **$5–$30/day in egress** alone for a quiet test cluster, much more under load.
+On top: **inter-cloud egress** at the ~$0.05–$0.15/GB tier on every provider. Even idle, broker-to-broker raft heartbeats + Cilium clustermesh-apiserver sync + BGP keepalives add up. Plan for **$5–$30/day in egress** alone for a quiet test cluster, much more under load.
 
 Tear down promptly when you're done validating.
 

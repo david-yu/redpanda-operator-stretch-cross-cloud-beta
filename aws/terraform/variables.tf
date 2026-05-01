@@ -91,3 +91,11 @@ variable "cross_cloud_udp_ports" {
   type        = list(number)
   default     = [51871, 8472]
 }
+
+# BGP ASN for this cloud's VPN gateway. Must be unique across the three
+# clouds in the mesh. Default 64512 is the typical Amazon-side ASN.
+variable "vpn_aws_asn" {
+  description = "BGP ASN for the AWS VPN gateway. Must be distinct from gcp / azure ASNs."
+  type        = number
+  default     = 64512
+}

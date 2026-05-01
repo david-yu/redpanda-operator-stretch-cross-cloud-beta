@@ -24,3 +24,28 @@ output "pod_cidr" {
 output "service_cidr" {
   value = var.service_cidr
 }
+
+# VPN-related outputs consumed by vpn/terraform/.
+output "vpc_id" {
+  value = module.vpc.vpc_id
+}
+
+output "vpc_cidr" {
+  value = var.vpc_cidr
+}
+
+output "private_route_table_ids" {
+  value = module.vpc.private_route_table_ids
+}
+
+output "public_route_table_ids" {
+  value = module.vpc.public_route_table_ids
+}
+
+output "vpn_gateway_id" {
+  value = aws_vpn_gateway.this.id
+}
+
+output "vpn_aws_asn" {
+  value = var.vpn_aws_asn
+}

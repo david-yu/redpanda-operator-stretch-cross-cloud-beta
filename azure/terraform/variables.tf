@@ -87,3 +87,15 @@ variable "cross_cloud_udp_ports" {
   type        = list(number)
   default     = [51871, 8472]
 }
+
+variable "gateway_subnet_cidr" {
+  description = "CIDR for the VPN Gateway's reserved 'GatewaySubnet' (Azure mandates that exact subnet name). Must be inside vnet_cidr and not overlap subnet_cidr."
+  type        = string
+  default     = "10.30.255.0/27"
+}
+
+variable "vpn_azure_asn" {
+  description = "BGP ASN for the Azure VPN Gateway. Must be distinct from aws / gcp ASNs."
+  type        = number
+  default     = 64514
+}

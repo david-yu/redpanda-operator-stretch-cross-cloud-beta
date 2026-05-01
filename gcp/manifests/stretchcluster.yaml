@@ -32,7 +32,9 @@ spec:
       key: license.key
   config:
     cluster:
-      default_leaders_preference: "racks:aws,gcp,azure"
+      # See aws/manifests/stretchcluster.yaml for the rationale: pin to a
+      # single rack (aws) so the controller stays in the lowest-RTT cloud.
+      default_leaders_preference: "racks:aws"
       partition_autobalancing_node_availability_timeout_sec: 30
       partition_autobalancing_node_autodecommission_timeout_sec: 60
       partition_autobalancing_mode: continuous

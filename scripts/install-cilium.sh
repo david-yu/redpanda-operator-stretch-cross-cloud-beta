@@ -6,12 +6,17 @@
 # Terraform to bring up a cluster with NO CNI:
 #
 #   - AWS EKS (no `vpc-cni` addon)  → ipam.mode=cluster-pool, eni.enabled=false
-#   - GCP GKE (no Dataplane V2)     → gke.enabled=true, ipam.mode=kubernetes
+#   - GCP GKE (no Dataplane V2)     → ipam.mode=kubernetes
 #   - Azure AKS (network_plugin=none) → aksbyocni.enabled=true, ipam.mode=cluster-pool
 #
 # All three install with kubeProxyReplacement (eBPF replaces kube-proxy)
-# and node-to-node WireGuard encryption so the cross-cloud pod traffic is
-# encrypted on the public internet.
+# and routingMode=tunnel (Geneve) so pod IPs encapsulate over node IPs.
+#
+# We do NOT enable encryption.nodeEncryption=wireguard here. The
+# site-to-site VPN provisioned by vpn/terraform/ already IPsec-encrypts
+# traffic between clouds, so adding WireGuard on top is redundant and
+# triggers cilium#31209 (asymmetric initial-connect routing breakage)
+# in this exact config.
 #
 # Cluster IDs (1-255) and names must be unique across the mesh:
 #   aws=1/rp-aws, gcp=2/rp-gcp, azure=3/rp-azure
@@ -58,9 +63,6 @@ install_aws() {
     --set kubeProxyReplacement=true \
     --set routingMode=tunnel \
     --set tunnelProtocol=geneve \
-    --set encryption.enabled=true \
-    --set encryption.type=wireguard \
-    --set encryption.nodeEncryption=true \
     --set bpf.masquerade=true \
     --set l7Proxy=false
   cilium status --context rp-aws --wait
@@ -96,9 +98,6 @@ install_gcp() {
     --set kubeProxyReplacement=true \
     --set routingMode=tunnel \
     --set tunnelProtocol=geneve \
-    --set encryption.enabled=true \
-    --set encryption.type=wireguard \
-    --set encryption.nodeEncryption=true \
     --set bpf.masquerade=true \
     --set l7Proxy=false \
     --set ipv4NativeRoutingCIDR=10.120.0.0/16
@@ -129,9 +128,6 @@ install_azure() {
     --set kubeProxyReplacement=true \
     --set routingMode=tunnel \
     --set tunnelProtocol=geneve \
-    --set encryption.enabled=true \
-    --set encryption.type=wireguard \
-    --set encryption.nodeEncryption=true \
     --set bpf.masquerade=true \
     --set l7Proxy=false
   cilium status --context rp-azure --wait
