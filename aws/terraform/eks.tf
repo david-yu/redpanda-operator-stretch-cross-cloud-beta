@@ -16,12 +16,13 @@ module "eks" {
   # routing.
   cluster_service_ipv4_cidr = var.service_cidr
 
-  # IMPORTANT: prevent EKS from auto-installing the aws-node (VPC CNI),
-  # kube-proxy, and coredns DaemonSets. Without this, EKS deploys
-  # `aws-node` alongside the cluster and Cilium has to fight it for
-  # ownership of pod networking. With it set, the cluster comes up
-  # bare and Cilium installs cleanly.
-  bootstrap_self_managed_addons = false
+  # NOTE: we'd love to set `bootstrap_self_managed_addons = false` here so
+  # EKS doesn't install aws-node automatically. Unfortunately the EKS
+  # managed node group has a built-in health check (~15 min timeout)
+  # waiting for nodes to be Ready, and without aws-node + kube-proxy
+  # nodes can't become Ready, so the node group create fails. Workaround:
+  # let EKS install aws-node, then delete the daemonset before Cilium
+  # install (the install-cilium.sh script handles this).
 
   # IMPORTANT: do NOT enable the `vpc-cni` addon. EKS will start the cluster
   # without a CNI and nodes will report NotReady until Cilium is installed.
