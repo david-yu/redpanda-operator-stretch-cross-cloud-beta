@@ -17,7 +17,8 @@
 set -uo pipefail
 
 CONTEXTS=(rp-aws rp-gcp rp-azure)
-declare -A CLOUD_OF=( [rp-aws]=aws [rp-gcp]=gcp [rp-azure]=azure )
+# bash 3.2 (macOS default) doesn't have associative arrays — use suffix.
+cloud_of() { echo "${1#rp-}"; }
 
 CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-v1.16.2}
 
@@ -41,7 +42,7 @@ helm repo add jetstack https://charts.jetstack.io --force-update >/dev/null 2>&1
 helm repo update jetstack >/dev/null 2>&1 || true
 
 for ctx in "${CONTEXTS[@]}"; do
-  cloud=${CLOUD_OF[$ctx]}
+  cloud=$(cloud_of "$ctx")
   log "=== $ctx ($cloud) ==="
 
   log "  install cert-manager"

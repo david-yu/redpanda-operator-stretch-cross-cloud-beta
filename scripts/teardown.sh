@@ -117,6 +117,22 @@ tf_destroy() {
 # AWS orphan sweep — same logic as the same-cloud aws/scripts/teardown.sh.
 aws_sweep() {
   for r in "$@"; do
+    # Cilium clustermesh-apiserver Service type=LoadBalancer creates
+    # *classic* ELBs (ELBv1) — `aws elbv2 describe-load-balancers` does
+    # not return these. Sweep ELBv1 first by their k8s ownership tag so
+    # leftover ENIs don't block VPC delete.
+    log "$r: sweep orphan classic ELBs (cilium clustermesh / k8s service)"
+    for name in $(aws elb describe-load-balancers --region "$r" \
+      --query 'LoadBalancerDescriptions[].LoadBalancerName' --output text 2>/dev/null); do
+      [[ -z "$name" ]] && continue
+      tagged=$(aws elb describe-tags --region "$r" --load-balancer-names "$name" \
+        --query 'TagDescriptions[0].Tags[?starts_with(Key, `kubernetes.io/cluster/`)] | length(@)' \
+        --output text 2>/dev/null || echo 0)
+      if [[ "$tagged" != "0" && "$tagged" != "" && "$tagged" != "None" ]]; then
+        aws elb delete-load-balancer --region "$r" --load-balancer-name "$name" 2>/dev/null \
+          && log "  deleted classic elb: $name" || true
+      fi
+    done
     log "$r: sweep orphan NLBs"
     for arn in $(aws elbv2 describe-load-balancers --region "$r" \
       --query 'LoadBalancers[?contains(LoadBalancerName, `k8s-redpanda`) || contains(LoadBalancerName, `k8s-clusterm`) || contains(LoadBalancerName, `k8s-rpaws`)].LoadBalancerArn' \
@@ -126,7 +142,7 @@ aws_sweep() {
     done
     log "$r: sweep orphan k8s-* security groups"
     for sg in $(aws ec2 describe-security-groups --region "$r" \
-      --filters 'Name=group-name,Values=k8s-redpanda*,k8s-traffic*,k8s-clusterm*,k8s-rpaws*' \
+      --filters 'Name=group-name,Values=k8s-redpanda*,k8s-traffic*,k8s-clusterm*,k8s-rpaws*,k8s-elb*' \
       --query 'SecurityGroups[].GroupId' --output text 2>/dev/null); do
       aws ec2 delete-security-group --region "$r" --group-id "$sg" 2>/dev/null \
         && log "  deleted sg: $sg" || true
