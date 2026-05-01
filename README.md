@@ -5,7 +5,12 @@ Validation scaffold for a Redpanda Operator v26.2.1+ StretchCluster that **spans
 Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (single-cloud, three-region). Where the same-cloud beta uses the cloud's native L3 mesh (AWS TGW, GCP global VPC, Azure VNet peering), this repo uses **Cilium ClusterMesh + WireGuard transparent encryption over the public internet**, so it works across cloud-provider boundaries with no SD-WAN or VPN tier in the middle.
 
 > [!WARNING]
-> **This is a scaffold, not a tested artifact.** The single-cloud beta has been validated end-to-end across all three clouds; this one has been written carefully but not yet end-to-end deployed. Treat the Terraform / scripts as a starting point and expect to fix small things on first apply. PRs welcome.
+> **Blocked by two open upstream Cilium issues for cross-cloud clustermesh.** Validation pass on 2026-05-01 brought up all three clusters and installed Cilium successfully; Cluster Mesh `connect` succeeded for the AWS↔GCP pair at the control-plane level. **However, pod-to-pod data plane fails across clouds** because Cilium has known bugs in this exact configuration:
+>
+> - **[cilium#24403](https://github.com/cilium/cilium/issues/24403)** (open CFP) — Cilium picks the node `InternalIP` for cluster-mesh tunnel endpoints, but cross-cloud nodes are only mutually reachable via `ExternalIP`. AWS pods try to send Geneve-encapsulated traffic to GCP nodes' `10.20.x.x` (private), which doesn't route across the WAN.
+> - **[cilium#31209](https://github.com/cilium/cilium/issues/31209)** (open) — When Tunneling + KubeProxyReplacement + WireGuard nodeEncryption are all enabled (our config), the initial clustermesh-apiserver connection establishment can fail asymmetrically: forward packets route natively but return packets get tunneled+encrypted with a key the destination hasn't received yet.
+>
+> **Until those land, cross-cloud Cilium ClusterMesh requires either a site-to-site VPN/SD-WAN (so InternalIPs route across clouds) or a patched Cilium build.** This scaffold is honest about that — useful for understanding the topology and as a base to build the VPN tier on, but not a working stretch cluster as-is.
 
 ## How it differs from the same-cloud beta
 
@@ -309,8 +314,22 @@ The cloud-rack ordering in `default_leaders_preference` (`racks:aws,gcp,azure` i
 
 ## Caveats / known issues
 
-- **Untested end-to-end.** The same-cloud beta has been validated three times across all three clouds; this scaffold has not. Expect minor adjustments on first run.
-- **`node_status_rpc` 100ms timeout.** Inherits the same constraint we hit on AWS in the same-cloud beta. Cross-cloud RTT is more variable than same-region — pick clouds in the same physical area (US East Coast triple is the safest).
+Found during the partial validation pass on 2026-05-01:
+
+- **Cilium CLI `--context` flag, not `--kube-context`.** The cilium-cli ≥ v0.16 dropped the `--kube-context` long-form. Scripts use `--context` to match.
+- **GKE Cilium install requires the original kube-context name.** When you install Cilium with `cilium install --context rp-gcp ...`, the CLI auto-detects GKE and tries to derive region/zone from the context name format `gke_PROJECT_ZONE_NAME`. After the rename to `rp-gcp` this fails (`unable to derive region and zone from context name`). Workaround documented in the install flow: rename the context back to its original `gke_<project>_<region>_rp-gcp` form for the Cilium install, then rename to `rp-gcp` after.
+- **Don't use `--set gke.enabled=true` for cross-cloud.** That flag selects GKE *native* routing which only works for same-cloud GCP-to-GCP. For the cross-cloud setup we use `routingMode=tunnel` (Geneve) on every cluster including GKE so pod traffic is encapsulated over the WAN.
+- **EKS bootstraps `aws-node` (VPC CNI) by default unless told not to.** The Terraform sets `bootstrap_self_managed_addons = false` to keep the cluster bare; without that you have to manually `kubectl delete daemonset aws-node` before Cilium install.
+- **GKE pre-existing pods need to be restarted to come under Cilium management.** kubenet-assigned pods keep their old IPs until restarted. After Cilium install, run `kubectl delete pods -A --field-selector=status.phase=Running -l '!cilium,!kube-dns'` to evict them so Cilium picks them up. The bootstrap script does this automatically.
+- **Cilium per-cluster CAs differ.** Each cluster's Cilium installation generates its own CA. The mesh `connect` step needs `--allow-mismatching-ca` so each cluster trusts the others' CAs. Connect-mesh.sh sets this.
+- **Cross-cloud reachability to specific IP/port combinations is fragile, and pod-to-pod across clusters fails even when clustermesh control-plane reports connected.** During validation we observed:
+  - From rp-aws hostNetwork pods, TCP to GCP/Azure clustermesh-apiserver public IPs (35.x.x.x and 20.x.x.x respectively) timed out, while ICMP to the same IPs worked (12ms RTT) and TCP to 8.8.8.8 / google.com worked fine.
+  - `cilium clustermesh status` reported `aws ↔ gcp connected` (control-plane mTLS to clustermesh-apiserver), but `kubectl exec` ping from a pod in rp-gcp to a pod IP in rp-aws gave 100% packet loss.
+  - This split between control-plane (works) and data-plane (broken) almost certainly tracks [Cilium issue #24403](https://github.com/cilium/cilium/issues/24403): the node-to-node WireGuard / Geneve tunnel needs UDP 51871 (or 8472 if not WG) reachable between the *actual node IPs* of every cluster, not just the clustermesh-apiserver LB IPs. Cloud egress firewalling, asymmetric routing on AWS, and MTU-fragmentation issues across the WAN can all break this silently. The Terraform configs in this repo open the right SG/firewall/NSG ports but you may still need to:
+    - Verify each cluster's node external IPs can reach the others' on UDP 51871: `nc -uvz <peer-node-public-ip> 51871`
+    - If using AWS, ensure nodes are in *public subnets with auto-assigned public IPs* (this repo's TF does this) — pods behind a NAT gateway add an extra hop that breaks WireGuard's symmetry assumptions.
+    - Drop the MTU explicitly: `cilium install ... --set MTU=1380` (default tunnel MTU may not account for Geneve + WG overhead on every cloud's underlying network).
+- **`node_status_rpc` 100ms timeout.** Inherits the same constraint we hit on AWS in the same-cloud beta. Cross-cloud RTT is more variable than same-region — pick clouds in the same physical area (US East Coast triple: `us-east-1` / `us-east1` / `eastus` ~5-15 ms pairwise) and lean on `default_leaders_preference: "racks:aws,gcp,azure"` to keep the controller in the lowest-RTT cloud.
 - **Public node IPs.** Every node is in a public subnet with a public IP for direct cross-cloud reachability. Production should use SD-WAN / IPsec VPN between clouds and put nodes in private subnets — left as an exercise.
 - **Cilium WireGuard MTU.** Geneve + WireGuard adds ~80 bytes of overhead. If you see PMTU issues, override Cilium's MTU (`--set MTU=1380`).
 - **Cross-cloud egress cost.** Already mentioned, worth repeating.

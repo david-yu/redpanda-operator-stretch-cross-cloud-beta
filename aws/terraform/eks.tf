@@ -16,6 +16,13 @@ module "eks" {
   # routing.
   cluster_service_ipv4_cidr = var.service_cidr
 
+  # IMPORTANT: prevent EKS from auto-installing the aws-node (VPC CNI),
+  # kube-proxy, and coredns DaemonSets. Without this, EKS deploys
+  # `aws-node` alongside the cluster and Cilium has to fight it for
+  # ownership of pod networking. With it set, the cluster comes up
+  # bare and Cilium installs cleanly.
+  bootstrap_self_managed_addons = false
+
   # IMPORTANT: do NOT enable the `vpc-cni` addon. EKS will start the cluster
   # without a CNI and nodes will report NotReady until Cilium is installed.
   # We also skip `kube-proxy` because Cilium replaces it with eBPF

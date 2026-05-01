@@ -66,12 +66,11 @@ resource "google_container_node_pool" "default" {
     image_type   = "COS_CONTAINERD"
     tags         = ["${var.cluster_name}-node"]
 
-    # Public IP per node so other clouds can reach this node directly for
-    # Cilium WireGuard / VXLAN tunnels. (Default is true on GKE Standard,
-    # but be explicit.)
-    workload_metadata_config {
-      mode = "GKE_METADATA"
-    }
+    # Public node IPs are GKE Standard's default — keep them so the other
+    # clouds can reach this node directly for Cilium WireGuard tunnels.
+    # (Workload Identity is unnecessary for this demo; omit the workload
+    # metadata config to avoid requiring `workload_identity_config` on
+    # the cluster.)
 
     oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
   }

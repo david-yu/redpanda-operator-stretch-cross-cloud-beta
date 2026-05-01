@@ -27,7 +27,7 @@
 
 set -uo pipefail
 
-CILIUM_VERSION=${CILIUM_VERSION:-1.16.5}
+CILIUM_VERSION=${CILIUM_VERSION:-1.19.3}
 POD_CIDR_AWS=${POD_CIDR_AWS:-10.110.0.0/16}
 POD_CIDR_AZURE=${POD_CIDR_AZURE:-10.130.0.0/16}
 
@@ -41,7 +41,13 @@ require_cli() {
 
 install_aws() {
   log "installing Cilium on rp-aws (EKS, cluster.id=1)"
-  cilium install --kube-context rp-aws \
+  # Belt-and-braces: even with `bootstrap_self_managed_addons = false`
+  # in TF, if the cluster was created before that change was applied
+  # there may be a stale aws-node DaemonSet. Delete it so it doesn't
+  # fight Cilium for pod networking ownership.
+  kubectl --context rp-aws -n kube-system delete daemonset aws-node --ignore-not-found >/dev/null 2>&1 || true
+
+  cilium install --context rp-aws \
     --version "$CILIUM_VERSION" \
     --set cluster.id=1 \
     --set cluster.name=rp-aws \
@@ -57,16 +63,35 @@ install_aws() {
     --set encryption.nodeEncryption=true \
     --set bpf.masquerade=true \
     --set l7Proxy=false
-  cilium status --kube-context rp-aws --wait
+  cilium status --context rp-aws --wait
+
+  kubectl --context rp-aws delete pods -A --field-selector=status.phase=Running \
+    -l 'k8s-app!=cilium' >/dev/null 2>&1 || true
 }
 
 install_gcp() {
   log "installing Cilium on rp-gcp (GKE, cluster.id=2)"
-  cilium install --kube-context rp-gcp \
+  # NOTE: we don't use --set gke.enabled=true because that mode targets
+  # GKE *native* routing. For cross-cloud we want tunnel mode anyway so
+  # Cilium can encapsulate pod traffic over the WAN.
+  #
+  # The cilium-cli still auto-detects GKE and tries to derive region/zone
+  # from the kube-context name in the form gke_PROJECT_ZONE_NAME — which
+  # fails after we rename the context to `rp-gcp`. Workaround: rename
+  # back to the GKE-style name for the install, then rename to `rp-gcp`
+  # afterwards.
+  local orig="gke_${GCP_PROJECT:?GCP_PROJECT must be set}_${GCP_REGION:-us-east1}_rp-gcp"
+  local renamed=0
+  if kubectl config get-contexts -o name 2>/dev/null | grep -qx rp-gcp; then
+    log "  renaming context rp-gcp → $orig for cilium install"
+    kubectl config rename-context rp-gcp "$orig" >/dev/null
+    renamed=1
+  fi
+
+  cilium install --context "$orig" \
     --version "$CILIUM_VERSION" \
     --set cluster.id=2 \
     --set cluster.name=rp-gcp \
-    --set gke.enabled=true \
     --set ipam.mode=kubernetes \
     --set kubeProxyReplacement=true \
     --set routingMode=tunnel \
@@ -75,13 +100,25 @@ install_gcp() {
     --set encryption.type=wireguard \
     --set encryption.nodeEncryption=true \
     --set bpf.masquerade=true \
-    --set l7Proxy=false
-  cilium status --kube-context rp-gcp --wait
+    --set l7Proxy=false \
+    --set ipv4NativeRoutingCIDR=10.120.0.0/16
+
+  cilium status --context "$orig" --wait
+
+  # Restart unmanaged pods so Cilium takes over their networking
+  # (kubenet-assigned pods keep their old IPs until evicted).
+  kubectl --context "$orig" delete pods -A --field-selector=status.phase=Running \
+    -l 'k8s-app!=cilium,k8s-app!=kube-dns' >/dev/null 2>&1 || true
+
+  if [[ $renamed -eq 1 ]]; then
+    log "  renaming $orig back → rp-gcp"
+    kubectl config rename-context "$orig" rp-gcp >/dev/null
+  fi
 }
 
 install_azure() {
   log "installing Cilium on rp-azure (AKS BYOCNI, cluster.id=3)"
-  cilium install --kube-context rp-azure \
+  cilium install --context rp-azure \
     --version "$CILIUM_VERSION" \
     --set cluster.id=3 \
     --set cluster.name=rp-azure \
@@ -97,7 +134,10 @@ install_azure() {
     --set encryption.nodeEncryption=true \
     --set bpf.masquerade=true \
     --set l7Proxy=false
-  cilium status --kube-context rp-azure --wait
+  cilium status --context rp-azure --wait
+
+  kubectl --context rp-azure delete pods -A --field-selector=status.phase=Running \
+    -l 'k8s-app!=cilium,k8s-app!=kube-dns' >/dev/null 2>&1 || true
 }
 
 require_cli

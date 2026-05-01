@@ -30,28 +30,28 @@ log() { echo "[connect-mesh] $*" >&2; }
 enable_all() {
   for c in "${CONTEXTS[@]}"; do
     log "enabling clustermesh on $c"
-    cilium clustermesh enable --kube-context "$c" --service-type LoadBalancer
+    cilium clustermesh enable --context "$c" --service-type LoadBalancer
   done
   for c in "${CONTEXTS[@]}"; do
     log "waiting for clustermesh-apiserver Ready on $c"
-    cilium clustermesh status --kube-context "$c" --wait
+    cilium clustermesh status --context "$c" --wait
   done
 }
 
 # 3-clique: aws↔gcp, aws↔azure, gcp↔azure.
 connect_all() {
   log "connecting rp-aws ↔ rp-gcp"
-  cilium clustermesh connect --kube-context rp-aws --destination-context rp-gcp
+  cilium clustermesh connect --allow-mismatching-ca --context rp-aws --destination-context rp-gcp
   log "connecting rp-aws ↔ rp-azure"
-  cilium clustermesh connect --kube-context rp-aws --destination-context rp-azure
+  cilium clustermesh connect --allow-mismatching-ca --context rp-aws --destination-context rp-azure
   log "connecting rp-gcp ↔ rp-azure"
-  cilium clustermesh connect --kube-context rp-gcp --destination-context rp-azure
+  cilium clustermesh connect --allow-mismatching-ca --context rp-gcp --destination-context rp-azure
 }
 
 status_all() {
   for c in "${CONTEXTS[@]}"; do
     log "=== $c ==="
-    cilium clustermesh status --kube-context "$c"
+    cilium clustermesh status --context "$c"
   done
 }
 
