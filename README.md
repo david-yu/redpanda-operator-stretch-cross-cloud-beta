@@ -184,8 +184,9 @@ After the script returns, `cilium status --context rp-aws` should report `OK` an
 
 This runs:
 1. `cilium clustermesh enable --service-type LoadBalancer` on each cluster (provisions a public LB for `clustermesh-apiserver` on port 2379, mTLS-secured)
-2. `cilium clustermesh connect --allow-mismatching-ca` for each pair (aws↔gcp, aws↔azure, gcp↔azure)
-3. `cilium clustermesh status` on each cluster
+2. Re-issues each cluster's `clustermesh-apiserver-server-cert` with both `serverAuth` and `clientAuth` Extended Key Usages, then rolls the apiserver deployment. Workaround for [cilium#43099](https://github.com/cilium/cilium/issues/43099) — the helm-shipped server cert only carries `serverAuth`, and KVStoreMesh fails peer auth as a TLS *client* with `unknown certificate authority`. **Fixed upstream in [cilium#43230](https://github.com/cilium/cilium/pull/43230) (merged Dec 2025), included in 1.20.0-pre.1; once 1.20.0 GA ships we can pin to it and delete `patch_server_cert_clientauth()` from `connect-mesh.sh`.**
+3. `cilium clustermesh connect --allow-mismatching-ca` for each pair (aws↔gcp, aws↔azure, gcp↔azure)
+4. `cilium clustermesh status` on each cluster
 
 Connectivity is established when `cilium clustermesh status` shows `2 / 2 remote clusters connected` on every cluster. Pod-to-pod traffic across clouds flows through Cilium's Geneve tunnel encapsulated to peer node InternalIPs (which are routable thanks to step 2's VPN mesh).
 
