@@ -21,7 +21,9 @@ resource "aws_vpn_connection" "to_azure" {
   vpn_gateway_id      = var.aws_vpn_gateway_id
   customer_gateway_id = aws_customer_gateway.azure.id
   type                = "ipsec.1"
-  static_routes_only  = false
+  # See aws_vpn_connection.to_gcp for the rationale: BGP convergence
+  # was unreliable, switched to static routes.
+  static_routes_only = true
 
   tunnel1_inside_cidr   = local.aws_to_azure_tunnel_inside_cidr
   tunnel1_preshared_key = random_password.psk_aws_azure.result
@@ -31,17 +33,26 @@ resource "aws_vpn_connection" "to_azure" {
   }
 }
 
+resource "aws_vpn_connection_route" "to_azure" {
+  destination_cidr_block = var.azure_vnet_cidr
+  vpn_connection_id      = aws_vpn_connection.to_azure.id
+}
+
+resource "aws_route" "public_to_azure" {
+  for_each               = toset(var.aws_route_table_ids)
+  route_table_id         = each.value
+  destination_cidr_block = var.azure_vnet_cidr
+  gateway_id             = var.aws_vpn_gateway_id
+}
+
 # Azure side
 resource "azurerm_local_network_gateway" "aws" {
   name                = "rp-aws-lng"
   resource_group_name = var.azure_resource_group_name
   location            = var.azure_location
   gateway_address     = aws_vpn_connection.to_azure.tunnel1_address
-
-  bgp_settings {
-    asn                 = var.aws_asn
-    bgp_peering_address = local.aws_to_azure_aws_bgp_ip
-  }
+  # Static routing — advertise AWS VPC CIDR via this LNG.
+  address_space = [var.aws_vpc_cidr]
 }
 
 resource "azurerm_virtual_network_gateway_connection" "to_aws" {
@@ -53,8 +64,10 @@ resource "azurerm_virtual_network_gateway_connection" "to_aws" {
   virtual_network_gateway_id = var.azure_vpn_gateway_id
   local_network_gateway_id   = azurerm_local_network_gateway.aws.id
 
-  shared_key  = random_password.psk_aws_azure.result
-  enable_bgp  = true
+  shared_key = random_password.psk_aws_azure.result
+  # See aws_vpn_connection.to_azure for the rationale: switched away
+  # from BGP because convergence was unreliable.
+  enable_bgp = false
   ipsec_policy {
     dh_group         = "DHGroup14"
     ike_encryption   = "AES256"

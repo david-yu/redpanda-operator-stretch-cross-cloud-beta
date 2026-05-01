@@ -18,6 +18,8 @@ resource "azurerm_public_ip" "vpn" {
   resource_group_name = azurerm_resource_group.this.name
   allocation_method   = "Static"
   sku                 = "Standard"
+  # AZ SKUs require zone-redundant Public IPs. Specify all 3 zones.
+  zones = ["1", "2", "3"]
 }
 
 resource "azurerm_virtual_network_gateway" "this" {
@@ -30,8 +32,12 @@ resource "azurerm_virtual_network_gateway" "this" {
 
   active_active = false
   enable_bgp    = true
-  sku           = "VpnGw1"
-  generation    = "Generation1"
+  # Azure deprecated non-AZ VPN SKUs (VpnGw1, etc.) — only the *AZ
+  # variants are creatable now. The azurerm provider's enum validation
+  # currently only accepts VpnGw2AZ and up (VpnGw1AZ doesn't pass validation
+  # despite being a real Azure SKU), so we use VpnGw2AZ — ~$0.49/hr.
+  sku        = "VpnGw2AZ"
+  generation = "Generation2"
 
   ip_configuration {
     name                          = "default"

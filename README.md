@@ -4,13 +4,17 @@ Validation scaffold for a Redpanda Operator v26.2.1+ StretchCluster that **spans
 
 Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (single-cloud, three-region). Where the same-cloud beta uses the cloud's native L3 mesh (AWS TGW, GCP global VPC, Azure VNet peering), this repo uses **a 3-way mesh of site-to-site IPsec VPNs (BGP-routed) + Cilium ClusterMesh on top**, so node InternalIPs are routable across cloud boundaries and Cilium's clustermesh data plane works without modification.
 
-> [!NOTE]
-> **Why the VPN tier?** First validation pass (without VPN, public-internet pod traffic + Cilium WireGuard nodeEncryption) hit two open upstream Cilium issues that prevent the data plane from establishing:
+> [!WARNING]
+> **VPN BGP convergence is a known blocker on this scaffold (2026-05-01 validation pass).** All three cloud VPN gateways come up cleanly via Terraform and the IPsec tunnels report `IPSEC IS UP` on the AWS side; both `gcloud compute routers get-status` and `az network vnet-gateway list-bgp-peer-status` show GCP/Azure BGP peers stuck in `Connect`/`Connecting`. AWS reports both tunnel BGP states as `DOWN`. No cross-cloud node-IP ping yet works.
+>
+> Possible root causes (not yet validated in this scaffold): the AWS Site-to-Site VPN BGP-IP / inside-CIDR allocations on the customer-gateway side may not match what `google_compute_router_peer` and `azurerm_local_network_gateway.bgp_settings` configure, or AWS may require specific tunnel-options (IKE version, encryption suite) that the defaults here don't set. Debugging this fully needs hands-on AWS / GCP / Azure VPN-BGP expertise; the scaffold is fine through the tunnel-creation level but you'll need to fix BGP before the data plane is usable.
+>
+> **Why the VPN tier was added in the first place** — without it, the stack hits two open upstream Cilium issues that prevent cross-cloud clustermesh data plane from establishing:
 >
 > - **[cilium#24403](https://github.com/cilium/cilium/issues/24403)** — Cilium picks node `InternalIP` for clustermesh tunnel endpoints, but cross-cloud nodes are only reachable via `ExternalIP` without a VPN. AWS pods try to send traffic to GCP nodes' private `10.20.x.x`, which doesn't route across the WAN.
 > - **[cilium#31209](https://github.com/cilium/cilium/issues/31209)** — Tunnel + KubeProxyReplacement + WireGuard nodeEncryption combination causes asymmetric initial-connect routing.
 >
-> A site-to-site VPN tier sidesteps both: InternalIPs become mutually routable across clouds (fixes #24403), and we drop WireGuard nodeEncryption since IPsec already encrypts the underlay (fixes #31209). The VPN's per-month cost (~$300-$500 idle for the 3 gateways) is well worth not maintaining a Cilium fork.
+> The VPN tier sidesteps both: InternalIPs become mutually routable across clouds (fixes #24403), and we drop WireGuard nodeEncryption since IPsec already encrypts the underlay (fixes #31209) — *once BGP actually converges*.
 
 ## How it differs from the same-cloud beta
 

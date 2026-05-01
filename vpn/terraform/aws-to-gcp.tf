@@ -28,7 +28,15 @@ resource "aws_vpn_connection" "to_gcp" {
   vpn_gateway_id      = var.aws_vpn_gateway_id
   customer_gateway_id = aws_customer_gateway.gcp.id
   type                = "ipsec.1"
-  static_routes_only  = false
+
+  # NOTE: AWS↔GCP HA-VPN BGP convergence is fragile in practice — IPsec
+  # establishes cleanly but the BGP session sticks in Connect/Connecting
+  # for hours despite matching ASNs/PSKs/inside-CIDRs. The
+  # devgenius.io article on this exact pairing recommends using static
+  # routes on both sides instead of BGP, so we follow that here:
+  # static_routes_only=true on AWS, manual aws_vpn_connection_route +
+  # google_compute_route on the peer side.
+  static_routes_only = true
 
   tunnel1_inside_cidr   = local.aws_to_gcp_tunnel_inside_cidr
   tunnel1_preshared_key = random_password.psk_aws_gcp.result
@@ -36,6 +44,23 @@ resource "aws_vpn_connection" "to_gcp" {
   tags = {
     Name = "to-rp-gcp"
   }
+}
+
+# Static route on the AWS side: traffic to GCP subnet CIDR exits via
+# this VPN connection.
+resource "aws_vpn_connection_route" "to_gcp" {
+  destination_cidr_block = var.gcp_subnet_cidr
+  vpn_connection_id      = aws_vpn_connection.to_gcp.id
+}
+
+# Static route on every public route table so traffic destined to the
+# GCP subnet CIDR is forwarded to the VGW (which then routes it through
+# the VPN connection above).
+resource "aws_route" "public_to_gcp" {
+  for_each               = toset(var.aws_route_table_ids)
+  route_table_id         = each.value
+  destination_cidr_block = var.gcp_subnet_cidr
+  gateway_id             = var.aws_vpn_gateway_id
 }
 
 resource "aws_vpn_gateway_route_propagation" "to_gcp_private" {
@@ -67,6 +92,12 @@ resource "google_compute_vpn_tunnel" "to_aws" {
   ike_version                     = 2
 }
 
+# GCP HA VPN strictly requires BGP — without router_interface +
+# router_peer GCP refuses to make the tunnel operational. We keep the
+# BGP wiring but expect the peer to stay DOWN (AWS now uses
+# static_routes_only=true and won't BGP-advertise back). The actual
+# routing is via the explicit google_compute_route below; the BGP
+# session existing in DOWN state is harmless overhead.
 resource "google_compute_router_interface" "to_aws" {
   name       = "to-rp-aws-iface"
   region     = var.gcp_region
@@ -76,11 +107,21 @@ resource "google_compute_router_interface" "to_aws" {
 }
 
 resource "google_compute_router_peer" "to_aws" {
-  name            = "to-rp-aws-bgp"
-  region          = var.gcp_region
-  router          = var.gcp_router_name
-  peer_ip_address = local.aws_to_gcp_aws_bgp_ip
-  peer_asn        = var.aws_asn
-  interface       = google_compute_router_interface.to_aws.name
+  name                      = "to-rp-aws-bgp"
+  region                    = var.gcp_region
+  router                    = var.gcp_router_name
+  peer_ip_address           = local.aws_to_gcp_aws_bgp_ip
+  peer_asn                  = var.aws_asn
+  interface                 = google_compute_router_interface.to_aws.name
   advertised_route_priority = 100
+}
+
+# Manual route for the actual AWS-bound traffic — bypasses the (DOWN)
+# BGP session.
+resource "google_compute_route" "to_aws" {
+  name                = "to-rp-aws-via-vpn"
+  network             = var.gcp_network_name
+  dest_range          = var.aws_vpc_cidr
+  next_hop_vpn_tunnel = google_compute_vpn_tunnel.to_aws.id
+  priority            = 1000
 }

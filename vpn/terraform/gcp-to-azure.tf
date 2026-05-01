@@ -28,6 +28,10 @@ resource "google_compute_vpn_tunnel" "to_azure_a" {
   ike_version                     = 2
 }
 
+# GCP HA VPN requires BGP wiring on the Cloud Router (see aws-to-gcp.tf
+# for the rationale). Keep the router_interface + router_peer for HA
+# VPN to consider the tunnel valid; the actual route comes from the
+# google_compute_route resource below.
 resource "google_compute_router_interface" "to_azure_a" {
   name       = "to-rp-azure-a-iface"
   region     = var.gcp_region
@@ -46,17 +50,23 @@ resource "google_compute_router_peer" "to_azure_a" {
   advertised_route_priority = 100
 }
 
+# Static route on GCP side: send Azure VNet CIDR traffic via this tunnel.
+resource "google_compute_route" "to_azure" {
+  name                = "to-rp-azure-via-vpn"
+  network             = var.gcp_network_name
+  dest_range          = var.azure_vnet_cidr
+  next_hop_vpn_tunnel = google_compute_vpn_tunnel.to_azure_a.id
+  priority            = 1000
+}
+
 # Azure side
 resource "azurerm_local_network_gateway" "gcp" {
   name                = "rp-gcp-lng"
   resource_group_name = var.azure_resource_group_name
   location            = var.azure_location
   gateway_address     = var.gcp_ha_vpn_gateway_ip_a
-
-  bgp_settings {
-    asn                 = var.gcp_asn
-    bgp_peering_address = local.gcp_to_azure_a_gcp_bgp_ip
-  }
+  # Static routing — advertise GCP subnet CIDR via this LNG.
+  address_space = [var.gcp_subnet_cidr]
 }
 
 resource "azurerm_virtual_network_gateway_connection" "to_gcp" {
@@ -68,8 +78,8 @@ resource "azurerm_virtual_network_gateway_connection" "to_gcp" {
   virtual_network_gateway_id = var.azure_vpn_gateway_id
   local_network_gateway_id   = azurerm_local_network_gateway.gcp.id
 
-  shared_key  = random_password.psk_gcp_azure.result
-  enable_bgp  = true
+  shared_key = random_password.psk_gcp_azure.result
+  enable_bgp = false
   ipsec_policy {
     dh_group         = "DHGroup14"
     ike_encryption   = "AES256"
