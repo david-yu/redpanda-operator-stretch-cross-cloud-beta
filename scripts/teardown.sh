@@ -140,20 +140,30 @@ aws_sweep() {
       aws elbv2 delete-load-balancer --region "$r" --load-balancer-arn "$arn" 2>/dev/null \
         && log "  deleted nlb: $arn" || true
     done
+    # After ELB delete, ENIs spend 5-10 min `in-use` (Status=detaching) before
+    # AWS releases them. If we go straight to SG / VPC delete those will all
+    # fail with DependencyViolation. Force-detach + force-delete the ELB-owned
+    # ENIs ourselves so the rest of the teardown isn't blocked on AWS' lazy
+    # cleanup.
+    log "$r: force-detach + delete ELB/EKS ENIs (don't wait 5-10min for AWS)"
+    for eni in $(aws ec2 describe-network-interfaces --region "$r" \
+      --query 'NetworkInterfaces[?contains(Description, `ELB`) || contains(Description, `EKS`)].NetworkInterfaceId' \
+      --output text 2>/dev/null); do
+      attach_id=$(aws ec2 describe-network-interfaces --region "$r" --network-interface-ids "$eni" \
+        --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null)
+      if [[ -n "$attach_id" && "$attach_id" != "None" ]]; then
+        aws ec2 detach-network-interface --region "$r" --attachment-id "$attach_id" --force 2>/dev/null \
+          && log "  detached eni: $eni" || true
+      fi
+      aws ec2 delete-network-interface --region "$r" --network-interface-id "$eni" 2>/dev/null \
+        && log "  deleted eni: $eni" || true
+    done
     log "$r: sweep orphan k8s-* security groups"
     for sg in $(aws ec2 describe-security-groups --region "$r" \
       --filters 'Name=group-name,Values=k8s-redpanda*,k8s-traffic*,k8s-clusterm*,k8s-rpaws*,k8s-elb*' \
       --query 'SecurityGroups[].GroupId' --output text 2>/dev/null); do
       aws ec2 delete-security-group --region "$r" --group-id "$sg" 2>/dev/null \
         && log "  deleted sg: $sg" || true
-    done
-    log "$r: sweep available ENIs"
-    for eni in $(aws ec2 describe-network-interfaces --region "$r" \
-      --filters 'Name=status,Values=available' \
-      --query 'NetworkInterfaces[?contains(Description, `ELB`) || contains(Description, `EKS`)].NetworkInterfaceId' \
-      --output text 2>/dev/null); do
-      aws ec2 delete-network-interface --region "$r" --network-interface-id "$eni" 2>/dev/null \
-        && log "  deleted eni: $eni" || true
     done
   done
 }
