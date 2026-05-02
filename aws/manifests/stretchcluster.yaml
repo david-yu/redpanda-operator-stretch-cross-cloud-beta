@@ -21,25 +21,44 @@ spec:
   rackAwareness:
     enabled: true
     nodeAnnotation: redpanda.com/cloud
-  # Brokers must verify each other across clusters, which requires a
-  # SHARED root CA across all 3 — `caEnabled: true` would have each
-  # cluster's cert-manager mint a different self-signed CA, and the
-  # cross-cluster handshakes fail with `SSL routines::packet length too
-  # long` / `record layer failure`. We pre-create the shared CA via
-  # `scripts/bootstrap-shared-ca.sh` (which generates one P-256 root
-  # locally and applies the same Secret + cert-manager Issuer
-  # `redpanda-shared-ca-issuer` in every cluster's redpanda namespace),
-  # then point the StretchCluster's TLS config at it. cert-manager in
-  # each cluster mints per-broker leaves signed by the same root, so
-  # peer verification works.
+  # Broker TLS is *off* for this cross-cloud scaffold. Two reasons:
+  #
+  # 1. Confidentiality is already covered at a lower layer. Every byte
+  #    that crosses a cloud boundary rides over the IPsec VPN tunnels
+  #    provisioned by `vpn/terraform/`:
+  #
+  #      AWS: aws_vpn_connection — IKEv2 + AES-256-GCM (default)
+  #      GCP: google_compute_vpn_tunnel via google_compute_ha_vpn_gateway
+  #           — IKEv2 + AES-256-GCM
+  #      Azure: azurerm_virtual_network_gateway_connection — IKEv2 +
+  #             AES-256-GCM
+  #
+  #    Pod-to-pod traffic between brokers in different clouds is
+  #    encapsulated by Cilium in Geneve, then encrypted again by the
+  #    cloud VPN gateway as the underlay UDP packet hits the WAN. By
+  #    the time any byte is on the public Internet between two clouds
+  #    it has already been authenticated and encrypted by IPsec.
+  #    Adding broker-level TLS on top is double encryption for the same
+  #    hop — useful only if you want a defense-in-depth layer in case
+  #    the VPN drops, which would also break pod-IP routing entirely
+  #    so brokers couldn't talk regardless.
+  #
+  # 2. The Redpanda operator's auto-generated cert SANs (`*.redpanda`,
+  #    `*.redpanda.svc`, etc.) are rejected by strict TLS hostname
+  #    verification (RFC 6125 forbids wildcards on single-label parent
+  #    domains, like `*.com`). Brokers complete the TLS handshake then
+  #    the RPC client drops the connection with `rpc::errc:4` /
+  #    "Broken pipe" because OpenSSL reports `verify error:num=62:
+  #    hostname mismatch`. The operator doesn't expose a way to add
+  #    explicit per-broker SANs or to skip hostname verification on
+  #    cross-cluster RPC, so this would need an upstream fix.
+  #
+  # We keep `scripts/bootstrap-shared-ca.sh` and the per-cluster
+  # `redpanda-shared-ca-issuer` around for when this is enabled — once
+  # the SAN issue is resolved upstream the change here is just
+  # enabled: true + restoring the issuerRef block.
   tls:
-    enabled: true
-    certs:
-      default:
-        issuerRef:
-          kind: Issuer
-          name: redpanda-shared-ca-issuer
-        applyInternalDNSNames: true
+    enabled: false
   enterprise:
     licenseSecretRef:
       name: redpanda-license

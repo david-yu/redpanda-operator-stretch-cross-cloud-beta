@@ -21,14 +21,13 @@ spec:
   rackAwareness:
     enabled: true
     nodeAnnotation: redpanda.com/cloud
+  # See aws/manifests/stretchcluster.yaml for the full rationale.
+  # tl;dr: cross-cloud traffic is already IPsec-encrypted by the VPN
+  # tunnels in vpn/terraform/, and the operator-generated TLS cert
+  # SANs hit RFC-6125 single-label-parent hostname-mismatch on the
+  # advertised RPC hostnames.
   tls:
-    enabled: true
-    certs:
-      default:
-        issuerRef:
-          kind: Issuer
-          name: redpanda-shared-ca-issuer
-        applyInternalDNSNames: true
+    enabled: false
   enterprise:
     licenseSecretRef:
       name: redpanda-license

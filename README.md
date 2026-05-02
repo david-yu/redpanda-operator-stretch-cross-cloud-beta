@@ -16,9 +16,9 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 > | EBS CSI driver + PVC binding on AWS | ✅ |
 > | cert-manager webhook on EKS | ✅ (after `hostNetwork: true` + `securePort=10260` patch — see Step 6) |
 > | Multi-cluster operator + raft mesh (`rpk k8s multicluster status`) | ✅ |
-> | Shared CA across all 3 clusters (`scripts/bootstrap-shared-ca.sh`) | ✅ |
+> | Shared CA across all 3 clusters (`scripts/bootstrap-shared-ca.sh`) | ✅ — kept around for future use |
 > | StretchCluster + NodePool CRs applied, broker pods Running | ✅ (5 brokers, 0 crashes after PVC wipe) |
-> | Brokers form quorum & become `Ready` | ❌ `cluster_bootstrap_info` RPC fails with `rpc::errc:4` / `Broken pipe` immediately after a successful TLS handshake. Investigation in progress; likely either (a) a SAN-vs-`advertised_rpc_api`-hostname mismatch, or (b) a Redpanda 26.1.6 stretch-cluster-bootstrap RPC interaction we haven't isolated. |
+> | Brokers form quorum & become `Ready` | 🟡 Pending — TLS turned **off** at the broker layer because the operator-generated cert SANs (`*.redpanda`, `*.redpanda.svc`) violate RFC-6125 for single-label parents and OpenSSL fails hostname verification on the advertised broker hostname (`redpanda-rp-gcp-0.redpanda` etc.). The cross-cloud hop is already IPsec-encrypted by the VPN tunnels (see [Architecture → How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted)), so the `tls.enabled: false` choice is encryption-equivalent for that hop. |
 >
 > **Why the VPN tier exists** — without it, the stack hits two open upstream Cilium issues that prevent cross-cloud clustermesh data plane from establishing:
 >
@@ -68,6 +68,33 @@ Each cluster runs Cilium with:
 - `clustermesh-apiserver` exposed via `Service: type=LoadBalancer` per cluster, mTLS-secured
 
 The Redpanda multicluster operator runs in flat networking mode and creates per-peer headless Services + EndpointSlices on each cluster. Brokers reach peer brokers via cross-cluster pod IPs, which Cilium encapsulates over peer node InternalIPs — and those InternalIPs are routable thanks to the VPN BGP mesh.
+
+### How cross-cloud traffic is encrypted
+
+Every byte that crosses a cloud boundary is already encrypted by the cloud-native IPsec VPN tunnels in `vpn/terraform/` before it leaves the source cloud's network — so we deliberately do **not** stack additional encryption layers (no Cilium WireGuard nodeEncryption, and broker-level TLS is off — see the comment in `aws/manifests/stretchcluster.yaml`).
+
+Layered view of a single broker-to-broker packet from `redpanda-rp-aws-0` (10.110.x.x pod IP in AWS) to `redpanda-rp-gcp-0` (10.120.x.x pod IP in GCP):
+
+```
+┌── on the wire between AWS and GCP cloud edges ──────────────────────┐
+│ IPsec ESP (IKEv2 + AES-256-GCM)        ← VPN gateway encryption     │
+│  └─ underlay UDP (Cilium Geneve port)  ← Cilium tunnel              │
+│      └─ inner IPv4 (pod IP → pod IP)                                │
+│          └─ TCP/33145 (Redpanda RPC)   ← plaintext at this layer    │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Per-cloud crypto:
+
+| Cloud | Tunnel resource | IKE / cipher |
+|---|---|---|
+| AWS | `aws_vpn_connection` (Site-to-Site VPN) | IKEv2, AES-256-GCM (default) |
+| GCP | `google_compute_vpn_tunnel` on `google_compute_ha_vpn_gateway` | IKEv2, AES-256-GCM |
+| Azure | `azurerm_virtual_network_gateway_connection` (`VpnGw2AZ`) | IKEv2, AES-256-GCM |
+
+The TCP/33145 RPC payload between brokers is plaintext at the inner-most layer, but it never appears on a public path — it's wrapped in Geneve, then in IPsec ESP, before any byte hits the WAN. If the IPsec tunnel drops, pod-IP routing across clouds breaks at the same instant (Cilium's tunnel encapsulation has nowhere to deliver to), so brokers can't talk anyway. There's no "VPN down but data still flowing in plaintext" failure mode.
+
+Within a single cluster the broker traffic stays inside that cloud's VPC/VNet — same trust boundary as any other intra-cluster pod traffic. If you need defense-in-depth against an attacker on the *cloud-internal* network too, layer broker TLS on once the operator's hostname-mismatch issue (see Step 7) is resolved upstream.
 
 ## Repo layout
 
