@@ -4,6 +4,31 @@ Validation scaffold for a Redpanda Operator v26.2.1+ StretchCluster that **spans
 
 Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (single-cloud, three-region). Where the same-cloud beta uses the cloud's native L3 mesh (AWS TGW, GCP global VPC, Azure VNet peering), this repo uses **a 3-way mesh of site-to-site IPsec VPNs (BGP-routed) + Cilium ClusterMesh on top**, so node InternalIPs are routable across cloud boundaries and Cilium's clustermesh data plane works without modification.
 
+## Contents
+
+- [How it differs from the same-cloud beta](#how-it-differs-from-the-same-cloud-beta)
+- [Architecture](#architecture)
+  - [How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted)
+- [Repo layout](#repo-layout)
+- [Prerequisites](#prerequisites)
+- [Step-by-step](#step-by-step)
+  - [1. Bring up the three clusters + VPN gateways](#1-bring-up-the-three-clusters--vpn-gateways)
+  - [2. Wire the cross-cloud IPsec VPN mesh](#2-wire-the-cross-cloud-ipsec-vpn-mesh)
+  - [3. Verify VPN connectivity](#3-verify-vpn-connectivity)
+  - [4. Install Cilium on each cluster](#4-install-cilium-on-each-cluster)
+  - [5. Wire the three clusters into a Cilium ClusterMesh](#5-wire-the-three-clusters-into-a-cilium-clustermesh)
+  - [6. Bootstrap Redpanda prerequisites](#6-bootstrap-redpanda-prerequisites)
+  - [7. Install the operator + apply StretchCluster on each cluster](#7-install-the-operator--apply-stretchcluster-on-each-cluster)
+  - [8. Validate](#8-validate)
+- [Cost](#cost)
+- [Tear down](#tear-down)
+- [Troubleshooting](#troubleshooting)
+  - [Nodes stay `NotReady` after Cilium install](#nodes-stay-notready-after-cilium-install)
+  - [`cilium clustermesh status` shows `0 / 2 remote clusters connected`](#cilium-clustermesh-status-shows-0--2-remote-clusters-connected)
+  - [Brokers can't form quorum across clouds](#brokers-cant-form-quorum-across-clouds)
+  - [Auto-decom doesn't fire on a region failure](#auto-decom-doesnt-fire-on-a-region-failure)
+- [Caveats / known issues](#caveats--known-issues)
+
 > [!IMPORTANT]
 > **Current validation state (2026-05-01)** — the infrastructure layers are working end-to-end; the broker-cluster bootstrap is the remaining open issue.
 >
