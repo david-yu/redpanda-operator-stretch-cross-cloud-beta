@@ -28,6 +28,31 @@ spec:
   # advertised RPC hostnames.
   tls:
     enabled: false
+  # See aws/manifests/stretchcluster.yaml — every listener has tls
+  # disabled explicitly to match the no-cert reality.
+  listeners:
+    kafka:
+      tls: { enabled: false }
+      external:
+        default:
+          tls: { enabled: false }
+    admin:
+      tls: { enabled: false }
+      external:
+        default:
+          tls: { enabled: false }
+    http:
+      tls: { enabled: false }
+      external:
+        default:
+          tls: { enabled: false }
+    schemaRegistry:
+      tls: { enabled: false }
+      external:
+        default:
+          tls: { enabled: false }
+    rpc:
+      tls: { enabled: false }
   enterprise:
     licenseSecretRef:
       name: redpanda-license

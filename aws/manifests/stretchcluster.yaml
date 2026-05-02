@@ -61,6 +61,34 @@ spec:
   # cert-manager would otherwise mint a different self-signed root).
   tls:
     enabled: false
+  # spec.tls.enabled: false alone is not enough — the chart still emits
+  # external listeners with kafka_api_tls / admin_api_tls / pandaproxy_api_tls
+  # / schema_registry_api_tls referencing /etc/tls/certs/external/*, which
+  # don't exist with tls disabled. Explicitly disable TLS on every external
+  # listener so the operator's generated config matches the (no-cert) reality.
+  listeners:
+    kafka:
+      tls: { enabled: false }
+      external:
+        default:
+          tls: { enabled: false }
+    admin:
+      tls: { enabled: false }
+      external:
+        default:
+          tls: { enabled: false }
+    http:
+      tls: { enabled: false }
+      external:
+        default:
+          tls: { enabled: false }
+    schemaRegistry:
+      tls: { enabled: false }
+      external:
+        default:
+          tls: { enabled: false }
+    rpc:
+      tls: { enabled: false }
   enterprise:
     licenseSecretRef:
       name: redpanda-license
