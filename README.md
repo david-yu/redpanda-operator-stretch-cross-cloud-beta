@@ -30,7 +30,7 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 - [Caveats / known issues](#caveats--known-issues)
 
 > [!IMPORTANT]
-> **Current validation state (2026-05-01)** — the infrastructure layers are working end-to-end; the broker-cluster bootstrap is the remaining open issue.
+> **Current validation state (2026-05-01)** — full end-to-end validated, including cross-cloud produce / consume.
 >
 > | Layer | State |
 > |---|---|
@@ -41,8 +41,11 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 > | EBS CSI driver + PVC binding on AWS | ✅ |
 > | cert-manager webhook on EKS | ✅ (after `hostNetwork: true` + `securePort=10260` patch — see Step 6) |
 > | Multi-cluster operator + raft mesh (`rpk k8s multicluster status`) | ✅ |
-> | StretchCluster + NodePool CRs applied, broker pods Running | ✅ (5 brokers, 0 crashes after PVC wipe) |
-> | Brokers form quorum & become `Ready` | 🟡 Pending — TLS turned **off** at the broker layer because the operator-generated cert SANs (`*.redpanda`, `*.redpanda.svc`) violate RFC-6125 for single-label parents and OpenSSL fails hostname verification on the advertised broker hostname (`redpanda-rp-gcp-0.redpanda` etc.). The cross-cloud hop is already IPsec-encrypted by the VPN tunnels (see [Architecture → How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted)), so the `tls.enabled: false` choice is encryption-equivalent for that hop. |
+> | StretchCluster + NodePool CRs applied, broker pods Running | ✅ |
+> | All 5 brokers in cluster, controller leader on rp-aws | ✅ `rpk cluster health` reports `Healthy: true`, 5 nodes, 0 leaderless partitions |
+> | Cross-cloud produce / consume (`cross-cloud-test` topic, partitions=5, replicas=5) | ✅ produce on AWS → consume on GCP, produce on Azure → consume on AWS |
+>
+> **TLS at the broker layer is intentionally `enabled: false`** — the operator's auto-generated cert SANs (`*.redpanda`, `*.redpanda.svc`) violate RFC-6125 for single-label parents and OpenSSL fails hostname verification on the advertised broker hostname (`redpanda-rp-gcp-0.redpanda` etc.); brokers complete the TLS handshake then drop the RPC with `rpc::errc:4` / "Broken pipe". The cross-cloud hop is already IPsec-encrypted by the VPN tunnels (see [Architecture → How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted)), so `tls.enabled: false` is encryption-equivalent for that hop. Re-enabling broker TLS cleanly across clusters needs an operator change to either emit explicit per-broker SANs or skip hostname verification on cross-cluster RPC clients.
 >
 > **Why the VPN tier exists** — without it, the stack hits two open upstream Cilium issues that prevent cross-cloud clustermesh data plane from establishing:
 >
