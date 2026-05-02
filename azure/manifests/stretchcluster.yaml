@@ -25,7 +25,10 @@ spec:
     enabled: true
     certs:
       default:
-        caEnabled: true
+        issuerRef:
+          kind: Issuer
+          name: redpanda-shared-ca-issuer
+        applyInternalDNSNames: true
   enterprise:
     licenseSecretRef:
       name: redpanda-license

@@ -21,11 +21,25 @@ spec:
   rackAwareness:
     enabled: true
     nodeAnnotation: redpanda.com/cloud
+  # Brokers must verify each other across clusters, which requires a
+  # SHARED root CA across all 3 — `caEnabled: true` would have each
+  # cluster's cert-manager mint a different self-signed CA, and the
+  # cross-cluster handshakes fail with `SSL routines::packet length too
+  # long` / `record layer failure`. We pre-create the shared CA via
+  # `scripts/bootstrap-shared-ca.sh` (which generates one P-256 root
+  # locally and applies the same Secret + cert-manager Issuer
+  # `redpanda-shared-ca-issuer` in every cluster's redpanda namespace),
+  # then point the StretchCluster's TLS config at it. cert-manager in
+  # each cluster mints per-broker leaves signed by the same root, so
+  # peer verification works.
   tls:
     enabled: true
     certs:
       default:
-        caEnabled: true
+        issuerRef:
+          kind: Issuer
+          name: redpanda-shared-ca-issuer
+        applyInternalDNSNames: true
   enterprise:
     licenseSecretRef:
       name: redpanda-license

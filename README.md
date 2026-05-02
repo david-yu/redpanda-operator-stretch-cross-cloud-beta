@@ -4,17 +4,28 @@ Validation scaffold for a Redpanda Operator v26.2.1+ StretchCluster that **spans
 
 Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (single-cloud, three-region). Where the same-cloud beta uses the cloud's native L3 mesh (AWS TGW, GCP global VPC, Azure VNet peering), this repo uses **a 3-way mesh of site-to-site IPsec VPNs (BGP-routed) + Cilium ClusterMesh on top**, so node InternalIPs are routable across cloud boundaries and Cilium's clustermesh data plane works without modification.
 
-> [!WARNING]
-> **VPN BGP convergence is a known blocker on this scaffold (2026-05-01 validation pass).** All three cloud VPN gateways come up cleanly via Terraform and the IPsec tunnels report `IPSEC IS UP` on the AWS side; both `gcloud compute routers get-status` and `az network vnet-gateway list-bgp-peer-status` show GCP/Azure BGP peers stuck in `Connect`/`Connecting`. AWS reports both tunnel BGP states as `DOWN`. No cross-cloud node-IP ping yet works.
+> [!IMPORTANT]
+> **Current validation state (2026-05-01)** — the infrastructure layers are working end-to-end; the broker-cluster bootstrap is the remaining open issue.
 >
-> Possible root causes (not yet validated in this scaffold): the AWS Site-to-Site VPN BGP-IP / inside-CIDR allocations on the customer-gateway side may not match what `google_compute_router_peer` and `azurerm_local_network_gateway.bgp_settings` configure, or AWS may require specific tunnel-options (IKE version, encryption suite) that the defaults here don't set. Debugging this fully needs hands-on AWS / GCP / Azure VPN-BGP expertise; the scaffold is fine through the tunnel-creation level but you'll need to fix BGP before the data plane is usable.
+> | Layer | State |
+> |---|---|
+> | Per-cloud Terraform (EKS / GKE / AKS) | ✅ Apply clean |
+> | Cross-cloud IPsec VPN mesh | ✅ Established (switched to **static routes** — BGP convergence is fragile across these clouds, see `vpn/terraform/`) |
+> | Cilium ClusterMesh (control plane + KVStoreMesh) | ✅ All 3 clusters fully connected |
+> | Intra-cluster pod-to-pod networking | ✅ (after AWS node-SG self-rule fix in `aws/terraform/eks.tf`) |
+> | EBS CSI driver + PVC binding on AWS | ✅ |
+> | cert-manager webhook on EKS | ✅ (after `hostNetwork: true` + `securePort=10260` patch — see Step 6) |
+> | Multi-cluster operator + raft mesh (`rpk k8s multicluster status`) | ✅ |
+> | Shared CA across all 3 clusters (`scripts/bootstrap-shared-ca.sh`) | ✅ |
+> | StretchCluster + NodePool CRs applied, broker pods Running | ✅ (5 brokers, 0 crashes after PVC wipe) |
+> | Brokers form quorum & become `Ready` | ❌ `cluster_bootstrap_info` RPC fails with `rpc::errc:4` / `Broken pipe` immediately after a successful TLS handshake. Investigation in progress; likely either (a) a SAN-vs-`advertised_rpc_api`-hostname mismatch, or (b) a Redpanda 26.1.6 stretch-cluster-bootstrap RPC interaction we haven't isolated. |
 >
-> **Why the VPN tier was added in the first place** — without it, the stack hits two open upstream Cilium issues that prevent cross-cloud clustermesh data plane from establishing:
+> **Why the VPN tier exists** — without it, the stack hits two open upstream Cilium issues that prevent cross-cloud clustermesh data plane from establishing:
 >
 > - **[cilium#24403](https://github.com/cilium/cilium/issues/24403)** — Cilium picks node `InternalIP` for clustermesh tunnel endpoints, but cross-cloud nodes are only reachable via `ExternalIP` without a VPN. AWS pods try to send traffic to GCP nodes' private `10.20.x.x`, which doesn't route across the WAN.
 > - **[cilium#31209](https://github.com/cilium/cilium/issues/31209)** — Tunnel + KubeProxyReplacement + WireGuard nodeEncryption combination causes asymmetric initial-connect routing.
 >
-> The VPN tier sidesteps both: InternalIPs become mutually routable across clouds (fixes #24403), and we drop WireGuard nodeEncryption since IPsec already encrypts the underlay (fixes #31209) — *once BGP actually converges*.
+> The VPN tier sidesteps both: InternalIPs become mutually routable across clouds (fixes #24403), and we drop WireGuard nodeEncryption since IPsec already encrypts the underlay (fixes #31209). The original BGP-routed VPN scaffold didn't converge cleanly; we switched to **static routes** (per [this devgenius.io guide](https://blog.devgenius.io/lessons-from-connecting-gcp-and-aws-with-a-site-to-site-vpn-d5e0d27ec03c)) and that works.
 
 ## How it differs from the same-cloud beta
 
@@ -201,42 +212,81 @@ kubectl --context rp-aws run -i --tty --rm test --image=nicolaka/netshoot --rest
 
 ```bash
 ./scripts/bootstrap-redpanda.sh --license /path/to/redpanda.license
+./scripts/bootstrap-shared-ca.sh
 ```
 
-This installs cert-manager on each cluster, annotates every node with `redpanda.com/cloud=<aws|gcp|azure>` (so the operator's rack awareness picks the right rack), and creates the `redpanda` namespace + `redpanda-license` secret.
+`bootstrap-redpanda.sh` installs cert-manager on each cluster, annotates every node with `redpanda.com/cloud=<aws|gcp|azure>` (so the operator's rack awareness picks the right rack), and creates the `redpanda` namespace + `redpanda-license` secret.
+
+`bootstrap-shared-ca.sh` generates **one** P-256 root CA and applies the same Secret + cert-manager Issuer (`redpanda-shared-ca-issuer`) in every cluster's `redpanda` namespace. The StretchCluster manifests below point `tls.certs.default.issuerRef` at that issuer, so cert-manager mints per-broker leaves signed by the **same** root in every cloud — required for inter-broker TLS to verify peers across clusters. Without it, each cluster's cert-manager mints a different self-signed CA and inter-broker handshakes fail with `SSL routines::packet length too long` / `record layer failure`.
+
+**cert-manager webhook on EKS + Cilium**: cert-manager's webhook listens on port 10250 by default, which collides with kubelet on every node. EKS' API server then short-circuits the webhook with `Address is not allowed`. Per [cert-manager#403](https://github.com/cert-manager/website/issues/403) and the [EKS-Cilium thread on Stack Overflow](https://stackoverflow.com/questions/72548056/cert-manager-clusterissuer-undefined-on-eks-cluster-with-cilium-installed-as-cni), patch the webhook deployment to `hostNetwork: true` + `--secure-port=10260`, point the Service `targetPort` at `10260`, and authorize TCP/10260 from the EKS cluster SG → node SG. We patch the running deployment after `bootstrap-redpanda.sh` rather than re-deploying through the Jetstack chart because the helm values schema in v1.16.2 is older than the current docs:
+
+```bash
+for ctx in rp-aws rp-gcp rp-azure; do
+  kubectl --context $ctx -n cert-manager patch deploy cert-manager-webhook --type=json -p '[
+    {"op":"replace","path":"/spec/template/spec/hostNetwork","value":true},
+    {"op":"add","path":"/spec/template/spec/dnsPolicy","value":"ClusterFirstWithHostNet"},
+    {"op":"replace","path":"/spec/template/spec/containers/0/args/1","value":"--secure-port=10260"},
+    {"op":"replace","path":"/spec/template/spec/containers/0/ports/0/containerPort","value":10260}
+  ]'
+  kubectl --context $ctx -n cert-manager patch svc cert-manager-webhook --type=merge \
+    -p '{"spec":{"ports":[{"name":"https","port":443,"protocol":"TCP","targetPort":10260}]}}'
+done
+```
 
 ### 7. Install the operator + apply StretchCluster on each cluster
 
 The operator's `multicluster.peers` block lists the public LB hostname/IP of every cluster's `<name>-multicluster-peer` Service plus each cluster's K8s API server endpoint — so this is a **two-pass install**:
 
-**Pass 1**: helm-install the operator with empty/placeholder peers so the multicluster Service comes up and provisions a cloud LB.
+**Pass 1**: helm-install the operator with placeholder peers so it stands up and `rpk k8s multicluster bootstrap --loadbalancer` can then provision the peer LB Services. The chart in `redpanda-data/operator @ 26.2.1-beta.1` requires `multicluster.peers` to be set even on the first install, so we feed in three placeholder entries:
 
 ```bash
-helm repo add redpanda https://charts.redpanda.com
-helm repo update redpanda
+helm repo add redpanda-data https://charts.redpanda.com
+helm repo update
 
-# Pass 1 — placeholder peers, just to provision the LB Service.
+cat > /tmp/values-pass1.yaml <<EOF
+crds:
+  enabled: true
+multicluster:
+  enabled: true
+  name: PLACEHOLDER
+  apiServerExternalAddress: PLACEHOLDER
+  peers:
+    - name: rp-aws
+      address: placeholder.local
+    - name: rp-gcp
+      address: placeholder.local
+    - name: rp-azure
+      address: placeholder.local
+EOF
+
+RP_AWS_API=$(kubectl config view --raw -o jsonpath='{.clusters[?(@.name=="arn:aws:eks:us-east-1:605419575229:cluster/rp-aws")].cluster.server}')
+RP_GCP_API="https://$(gcloud container clusters describe rp-gcp --region us-east1 --format 'value(endpoint)'):443"
+RP_AZURE_API="https://$(az aks show -g rp-aws-cross-cloud -n rp-azure --query fqdn -o tsv):443"
+
 for ctx in rp-aws rp-gcp rp-azure; do
-  helm --kube-context $ctx upgrade --install $ctx redpanda/redpanda-operator \
-    -n redpanda \
-    --version v26.2.1-beta.1 \
+  case $ctx in rp-aws) api=$RP_AWS_API ;; rp-gcp) api=$RP_GCP_API ;; rp-azure) api=$RP_AZURE_API ;; esac
+  helm --kube-context $ctx upgrade --install $ctx redpanda-data/operator \
+    -n redpanda --version 26.2.1-beta.1 \
     --set fullnameOverride=$ctx \
-    --set crds.enabled=true \
-    --set multicluster.enabled=true \
-    --set multicluster.name=$ctx
+    --set multicluster.name=$ctx \
+    --set multicluster.apiServerExternalAddress=$api \
+    -f /tmp/values-pass1.yaml
 done
 ```
 
-Wait for the multicluster Service to get an external IP/hostname:
+Then provision the peer LB Services and bootstrap operator-mTLS in one shot:
 
 ```bash
-for ctx in rp-aws rp-gcp rp-azure; do
-  echo "=== $ctx ==="
-  kubectl --context $ctx -n redpanda get svc $ctx-multicluster-peer
-done
+rpk k8s multicluster bootstrap \
+  --context rp-aws --context rp-gcp --context rp-azure \
+  --namespace redpanda \
+  --loadbalancer
 ```
 
-**Pass 2**: collect the LB endpoints + K8s API endpoints, fill them into your per-cloud `helm-values/values-rp-<cloud>.example.yaml`, and `helm upgrade`.
+This prints back the exact `multicluster.peers` block (with each cluster's LB hostname/IP) ready to paste into your values files.
+
+**Pass 2**: fill the printed peer addresses + K8s API endpoints into your per-cloud `helm-values/values-rp-<cloud>.example.yaml`, and `helm upgrade`.
 
 ```bash
 # AWS endpoints
@@ -258,21 +308,23 @@ sed -e "s|<RP_AWS_API_SERVER>|$RP_AWS_API|g" \
     -e "s|<RP_AZURE_LB_IP>|$RP_AZURE_LB|g" \
     aws/helm-values/values-rp-aws.example.yaml > /tmp/values-rp-aws.yaml
 
-helm --kube-context rp-aws upgrade rp-aws redpanda/redpanda-operator -n redpanda \
-  --version v26.2.1-beta.1 -f /tmp/values-rp-aws.yaml
+helm --kube-context rp-aws upgrade rp-aws redpanda-data/operator -n redpanda \
+  --version 26.2.1-beta.1 -f /tmp/values-rp-aws.yaml
 ```
 
 Repeat the `sed` + `helm upgrade` for `rp-gcp` and `rp-azure`.
 
-Once all three operators are connected (check with `rpk k8s multicluster status` against any cluster), apply the StretchCluster + NodePool on each cluster:
+Once all three operators are connected (check with `rpk k8s multicluster status` against any cluster), apply the StretchCluster **and** NodePool on each cluster:
 
 ```bash
 for cloud in aws gcp azure; do
   ctx=rp-$cloud
   kubectl --context $ctx apply -f $cloud/manifests/stretchcluster.yaml
-  # NodePool sized 2 / 2 / 1 — see helm-values/values-rp-$cloud.example.yaml
+  kubectl --context $ctx apply -f $cloud/manifests/nodepool.yaml
 done
 ```
+
+`stretchcluster.yaml` is identical in shape across the three clouds (only the `rack:` rack name and the manifest filename's path differ). `nodepool.yaml` defines the per-cluster broker count: `replicas: 2` on aws + gcp, `replicas: 1` on azure (2/2/1 layout — RF=5 with quorum tolerance for losing one cloud).
 
 ### 8. Validate
 

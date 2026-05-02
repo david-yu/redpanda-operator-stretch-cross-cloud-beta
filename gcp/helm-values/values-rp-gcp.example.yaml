@@ -26,9 +26,6 @@ multicluster:
   service:
     enabled: true
 
-statefulset:
-  replicas: 2
-
 additionalCmdFlags:
   - --unbind-pvcs-after=120s
   - --allow-pv-rebinding

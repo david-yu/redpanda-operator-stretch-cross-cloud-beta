@@ -1,0 +1,14 @@
+apiVersion: cluster.redpanda.com/v1alpha2
+kind: NodePool
+metadata:
+  name: rp-aws
+  namespace: redpanda
+spec:
+  clusterRef:
+    group: cluster.redpanda.com
+    kind: StretchCluster
+    name: redpanda
+  replicas: 2
+  image:
+    repository: redpandadata/redpanda
+    tag: v26.1.6

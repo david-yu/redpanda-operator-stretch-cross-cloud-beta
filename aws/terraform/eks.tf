@@ -115,3 +115,22 @@ resource "aws_security_group_rule" "peer_cloud_all" {
   security_group_id = module.eks.node_security_group_id
   description       = "all from peer cloud CIDR (VPN-routed) ${each.value}"
 }
+
+# Allow ALL traffic from the node SG to itself. The terraform-aws-modules/eks
+# v20 module's default node SG only opens TCP 1025-65535 + DNS from self —
+# which is enough for kubelet/CoreDNS but BLOCKS ICMP and other in-VPC pod
+# traffic between nodes. Without this rule, hostNetwork ping between nodes
+# fails, and (more subtly) anything that depends on it — e.g. Cilium agents
+# falling back to ICMP for liveness, eBPF service-to-pod paths that DNAT
+# but don't catch the inverse — silently breaks. Intra-cluster pod-to-pod
+# over Geneve UDP/8472 is allowed via the cross_cloud_udp rule above
+# (0.0.0.0/0), but tooling that pings intra-cluster won't work without this.
+resource "aws_security_group_rule" "node_self_all" {
+  type                     = "ingress"
+  from_port                = 0
+  to_port                  = 0
+  protocol                 = "-1"
+  source_security_group_id = module.eks.node_security_group_id
+  security_group_id        = module.eks.node_security_group_id
+  description              = "all intra-cluster traffic (node-to-node ICMP, etc.)"
+}

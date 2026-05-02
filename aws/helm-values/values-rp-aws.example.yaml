@@ -44,9 +44,6 @@ multicluster:
   service:
     enabled: true
 
-statefulset:
-  replicas: 2
-
 # Operator-level PVCUnbinder. See docs/notes in the same-cloud beta for
 # full caveats; safe default for the demo, raise the timeout for production.
 additionalCmdFlags:

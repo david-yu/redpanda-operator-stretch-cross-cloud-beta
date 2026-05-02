@@ -26,11 +26,6 @@ multicluster:
   service:
     enabled: true
 
-# 2/2/1 layout: 1 broker in azure (the lighter rack — gives RF=5 quorum
-# tolerance for losing any single cloud).
-statefulset:
-  replicas: 1
-
 additionalCmdFlags:
   - --unbind-pvcs-after=120s
   - --allow-pv-rebinding
