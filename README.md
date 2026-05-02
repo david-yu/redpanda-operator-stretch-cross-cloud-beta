@@ -41,7 +41,6 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 > | EBS CSI driver + PVC binding on AWS | ✅ |
 > | cert-manager webhook on EKS | ✅ (after `hostNetwork: true` + `securePort=10260` patch — see Step 6) |
 > | Multi-cluster operator + raft mesh (`rpk k8s multicluster status`) | ✅ |
-> | Shared CA across all 3 clusters (`scripts/bootstrap-shared-ca.sh`) | ✅ — kept around for future use |
 > | StretchCluster + NodePool CRs applied, broker pods Running | ✅ (5 brokers, 0 crashes after PVC wipe) |
 > | Brokers form quorum & become `Ready` | 🟡 Pending — TLS turned **off** at the broker layer because the operator-generated cert SANs (`*.redpanda`, `*.redpanda.svc`) violate RFC-6125 for single-label parents and OpenSSL fails hostname verification on the advertised broker hostname (`redpanda-rp-gcp-0.redpanda` etc.). The cross-cloud hop is already IPsec-encrypted by the VPN tunnels (see [Architecture → How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted)), so the `tls.enabled: false` choice is encryption-equivalent for that hop. |
 >
@@ -264,12 +263,11 @@ kubectl --context rp-aws run -i --tty --rm test --image=nicolaka/netshoot --rest
 
 ```bash
 ./scripts/bootstrap-redpanda.sh --license /path/to/redpanda.license
-./scripts/bootstrap-shared-ca.sh
 ```
 
 `bootstrap-redpanda.sh` installs cert-manager on each cluster, annotates every node with `redpanda.com/cloud=<aws|gcp|azure>` (so the operator's rack awareness picks the right rack), and creates the `redpanda` namespace + `redpanda-license` secret.
 
-`bootstrap-shared-ca.sh` generates **one** P-256 root CA and applies the same Secret + cert-manager Issuer (`redpanda-shared-ca-issuer`) in every cluster's `redpanda` namespace. The StretchCluster manifests below point `tls.certs.default.issuerRef` at that issuer, so cert-manager mints per-broker leaves signed by the **same** root in every cloud — required for inter-broker TLS to verify peers across clusters. Without it, each cluster's cert-manager mints a different self-signed CA and inter-broker handshakes fail with `SSL routines::packet length too long` / `record layer failure`.
+> **Note on broker TLS**: this scaffold ships with `tls.enabled: false` on the StretchCluster manifests. Cross-cloud broker traffic is encrypted at the IPsec layer by the VPN tunnels in `vpn/terraform/` (see [How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted) for the layered view). Re-enabling broker TLS with the operator's auto-generated certs hits an RFC-6125 hostname-mismatch on the advertised RPC hostnames (`*.redpanda` doesn't match `redpanda-rp-gcp-0.redpanda` per strict TLS hostname verification), and the operator doesn't expose a way to add explicit per-broker SANs — left as a follow-up once that's resolved upstream.
 
 **cert-manager webhook on EKS + Cilium**: cert-manager's webhook listens on port 10250 by default, which collides with kubelet on every node. EKS' API server then short-circuits the webhook with `Address is not allowed`. Per [cert-manager#403](https://github.com/cert-manager/website/issues/403) and the [EKS-Cilium thread on Stack Overflow](https://stackoverflow.com/questions/72548056/cert-manager-clusterissuer-undefined-on-eks-cluster-with-cilium-installed-as-cni), patch the webhook deployment to `hostNetwork: true` + `--secure-port=10260`, point the Service `targetPort` at `10260`, and authorize TCP/10260 from the EKS cluster SG → node SG. We patch the running deployment after `bootstrap-redpanda.sh` rather than re-deploying through the Jetstack chart because the helm values schema in v1.16.2 is older than the current docs:
 

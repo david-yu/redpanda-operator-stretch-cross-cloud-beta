@@ -53,10 +53,12 @@ spec:
   #    explicit per-broker SANs or to skip hostname verification on
   #    cross-cluster RPC, so this would need an upstream fix.
   #
-  # We keep `scripts/bootstrap-shared-ca.sh` and the per-cluster
-  # `redpanda-shared-ca-issuer` around for when this is enabled — once
-  # the SAN issue is resolved upstream the change here is just
-  # enabled: true + restoring the issuerRef block.
+  # When the upstream operator can either emit explicit per-broker
+  # SANs or skip hostname verification on cross-cluster RPC clients,
+  # this becomes `enabled: true` + a `certs.default.issuerRef` pointing
+  # at a pre-bootstrapped shared CA Issuer (one root distributed to
+  # every cluster's redpanda namespace, since each cluster's local
+  # cert-manager would otherwise mint a different self-signed root).
   tls:
     enabled: false
   enterprise:
