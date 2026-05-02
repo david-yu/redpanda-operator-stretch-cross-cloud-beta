@@ -286,83 +286,58 @@ done
 
 ### 7. Install the operator + apply StretchCluster on each cluster
 
-The operator's `multicluster.peers` block lists the public LB hostname/IP of every cluster's `<name>-multicluster-peer` Service plus each cluster's K8s API server endpoint — so this is a **two-pass install**:
+This is a single-shot helm install — but the operator chart in `redpanda-data/operator @ 26.2.1-beta.1` requires `multicluster.peers` to already be set with each peer's LB hostname/IP. Same as same-cloud beta [step 3](https://github.com/david-yu/redpanda-operator-stretch-beta#step-by-step), we run `rpk k8s multicluster bootstrap` *before* `helm install` so it provisions the peer LB Services + signs the operator-mTLS / kubeconfig Secrets, and the helm install then consumes the peers it printed.
 
-**Pass 1**: helm-install the operator with placeholder peers so it stands up and `rpk k8s multicluster bootstrap --loadbalancer` can then provision the peer LB Services. The chart in `redpanda-data/operator @ 26.2.1-beta.1` requires `multicluster.peers` to be set even on the first install, so we feed in three placeholder entries:
-
-```bash
-helm repo add redpanda-data https://charts.redpanda.com
-helm repo update
-
-cat > /tmp/values-pass1.yaml <<EOF
-crds:
-  enabled: true
-multicluster:
-  enabled: true
-  name: PLACEHOLDER
-  apiServerExternalAddress: PLACEHOLDER
-  peers:
-    - name: rp-aws
-      address: placeholder.local
-    - name: rp-gcp
-      address: placeholder.local
-    - name: rp-azure
-      address: placeholder.local
-EOF
-
-RP_AWS_API=$(kubectl config view --raw -o jsonpath='{.clusters[?(@.name=="arn:aws:eks:us-east-1:605419575229:cluster/rp-aws")].cluster.server}')
-RP_GCP_API="https://$(gcloud container clusters describe rp-gcp --region us-east1 --format 'value(endpoint)'):443"
-RP_AZURE_API="https://$(az aks show -g rp-aws-cross-cloud -n rp-azure --query fqdn -o tsv):443"
-
-for ctx in rp-aws rp-gcp rp-azure; do
-  case $ctx in rp-aws) api=$RP_AWS_API ;; rp-gcp) api=$RP_GCP_API ;; rp-azure) api=$RP_AZURE_API ;; esac
-  helm --kube-context $ctx upgrade --install $ctx redpanda-data/operator \
-    -n redpanda --version 26.2.1-beta.1 \
-    --set fullnameOverride=$ctx \
-    --set multicluster.name=$ctx \
-    --set multicluster.apiServerExternalAddress=$api \
-    -f /tmp/values-pass1.yaml
-done
-```
-
-Then provision the peer LB Services and bootstrap operator-mTLS in one shot:
+**Step 7a — bootstrap multicluster TLS + kubeconfig secrets and provision peer LBs**:
 
 ```bash
 rpk k8s multicluster bootstrap \
   --context rp-aws --context rp-gcp --context rp-azure \
   --namespace redpanda \
-  --loadbalancer
+  --loadbalancer \
+  --loadbalancer-timeout 10m
 ```
 
-This prints back the exact `multicluster.peers` block (with each cluster's LB hostname/IP) ready to paste into your values files.
+This:
+- Creates a `<ctx>-multicluster-peer` Service of `type: LoadBalancer` in each cluster (port 9443) and waits for the cloud provider to assign an external IP/hostname.
+- Generates a shared CA across the three clusters and writes per-cluster TLS material to `<ctx>-multicluster-certificates` (the chart's expected Secret name).
+- Writes per-peer kubeconfig secrets so each operator pod can talk to peer clusters' API servers.
+- Prints a ready-to-paste `multicluster.peers` block with each cluster's LB address baked in.
 
-**Pass 2**: fill the printed peer addresses + K8s API endpoints into your per-cloud `helm-values/values-rp-<cloud>.example.yaml`, and `helm upgrade`.
+**Step 7b — render values files + helm install**:
 
 ```bash
-# AWS endpoints
+helm repo add redpanda-data https://charts.redpanda.com --force-update
+helm repo update
+
+# Per-cluster K8s API server endpoints (from terraform / cloud CLI):
 RP_AWS_API=$(aws eks describe-cluster --region us-east-1 --name rp-aws --query cluster.endpoint --output text)
-RP_AWS_LB=$(kubectl --context rp-aws -n redpanda get svc rp-aws-multicluster-peer -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-
-# GCP endpoints
-RP_GCP_API="https://$(gcloud container clusters describe rp-gcp --region us-east1 --format 'value(endpoint)'):443"
-RP_GCP_LB=$(kubectl --context rp-gcp -n redpanda get svc rp-gcp-multicluster-peer -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-
-# Azure endpoints
+RP_GCP_API="https://$(gcloud container clusters describe rp-gcp --region us-east1 --format='value(endpoint)'):443"
 RP_AZURE_API="https://$(az aks show -g rp-aws-cross-cloud -n rp-azure --query fqdn -o tsv):443"
+
+# Peer LB addresses (use whatever rpk k8s multicluster bootstrap printed,
+# or read them off the multicluster-peer Services it created):
+RP_AWS_LB=$(kubectl   --context rp-aws   -n redpanda get svc rp-aws-multicluster-peer   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+RP_GCP_LB=$(kubectl   --context rp-gcp   -n redpanda get svc rp-gcp-multicluster-peer   -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 RP_AZURE_LB=$(kubectl --context rp-azure -n redpanda get svc rp-azure-multicluster-peer -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 
-# Render values files and helm upgrade — one example, repeat for gcp and azure:
-sed -e "s|<RP_AWS_API_SERVER>|$RP_AWS_API|g" \
-    -e "s|<RP_AWS_NLB_HOSTNAME>|$RP_AWS_LB|g" \
-    -e "s|<RP_GCP_LB_IP>|$RP_GCP_LB|g" \
-    -e "s|<RP_AZURE_LB_IP>|$RP_AZURE_LB|g" \
-    aws/helm-values/values-rp-aws.example.yaml > /tmp/values-rp-aws.yaml
+for cloud in aws gcp azure; do
+  ctx=rp-$cloud
+  sed -e "s|<RP_AWS_API_SERVER>|$RP_AWS_API|g"     \
+      -e "s|<RP_GCP_API_SERVER>|$RP_GCP_API|g"     \
+      -e "s|<RP_AZURE_API_SERVER>|$RP_AZURE_API|g" \
+      -e "s|<RP_AWS_NLB_HOSTNAME>|$RP_AWS_LB|g"    \
+      -e "s|<RP_GCP_LB_IP>|$RP_GCP_LB|g"           \
+      -e "s|<RP_AZURE_LB_IP>|$RP_AZURE_LB|g"       \
+      $cloud/helm-values/values-$ctx.example.yaml > /tmp/values-$ctx.yaml
 
-helm --kube-context rp-aws upgrade rp-aws redpanda-data/operator -n redpanda \
-  --version 26.2.1-beta.1 -f /tmp/values-rp-aws.yaml
+  helm --kube-context $ctx upgrade --install $ctx redpanda-data/operator \
+    -n redpanda --version 26.2.1-beta.1 \
+    -f /tmp/values-$ctx.yaml
+done
 ```
 
-Repeat the `sed` + `helm upgrade` for `rp-gcp` and `rp-azure`.
+The helm release name **must** equal the kubectl context name (`rp-aws` / `rp-gcp` / `rp-azure`) so that the chart's generated TLS Secret name (`<ctx>-multicluster-certificates`) matches what `rpk k8s multicluster bootstrap` already wrote in step 7a.
 
 Once all three operators are connected (check with `rpk k8s multicluster status` against any cluster), apply the StretchCluster **and** NodePool on each cluster:
 
