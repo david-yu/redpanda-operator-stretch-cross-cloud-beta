@@ -379,7 +379,7 @@ kubectl --context rp-gcp -n redpanda exec -it redpanda-rp-gcp-0 -c redpanda -- \
 
 ## Cost
 
-This is **expensive** — cross-cloud egress + the VPN tier add up fast. Rough estimate (`us-east-1` / `us-east1` / `eastus`):
+Rough estimate (`us-east-1` / `us-east1` / `eastus`):
 
 | Component | $/hr |
 |---|---|
