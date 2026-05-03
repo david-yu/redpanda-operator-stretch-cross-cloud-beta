@@ -69,14 +69,17 @@ patch_finalizers() {
 helm_uninstall_all() {
   local ctx=$1
   # Demo addons live on rp-aws only; safe to attempt on every context (no-op
-  # if the release doesn't exist). Doing this BEFORE the redpanda uninstall
-  # frees the LBs (Console NLB, Grafana NLB) so the AWS sweep at the end
-  # has fewer ENIs to chase.
-  helm --kube-context "$ctx" uninstall console -n console 2>/dev/null || true
+  # if the release doesn't exist). Doing this BEFORE the redpanda operator
+  # uninstall frees the LBs (Console NLB, Grafana NLB) so the AWS sweep at
+  # the end has fewer ENIs to chase, AND lets the operator reconcile the
+  # Console CR's deletion (Deployment + Service teardown) before its own
+  # uninstall.
+  kubectl --context "$ctx" -n redpanda delete -f "$REPO_ROOT/console/console.yaml" \
+    --ignore-not-found 2>/dev/null || true
   helm --kube-context "$ctx" uninstall monitoring -n monitoring 2>/dev/null || true
   kubectl --context "$ctx" -n redpanda delete -f "$REPO_ROOT/omb/producer-job.yaml" \
     -f "$REPO_ROOT/omb/consumer-job.yaml" --ignore-not-found 2>/dev/null || true
-  kubectl --context "$ctx" delete namespace console monitoring --ignore-not-found 2>/dev/null || true
+  kubectl --context "$ctx" delete namespace monitoring --ignore-not-found 2>/dev/null || true
 
   helm --kube-context "$ctx" uninstall redpanda -n redpanda 2>/dev/null || true
   helm --kube-context "$ctx" uninstall "$ctx" -n redpanda 2>/dev/null || true
