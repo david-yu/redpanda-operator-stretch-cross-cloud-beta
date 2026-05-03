@@ -20,6 +20,7 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
   - [6. Bootstrap Redpanda prerequisites](#6-bootstrap-redpanda-prerequisites)
   - [7. Install the operator + apply StretchCluster on each cluster](#7-install-the-operator--apply-stretchcluster-on-each-cluster)
   - [8. Validate](#8-validate)
+  - [9. Demo add-ons: Console, OMB load, Prometheus + Grafana](#9-demo-add-ons-console-omb-load-prometheus--grafana)
 - [Cost](#cost)
 - [Tear down](#tear-down)
 - [Troubleshooting](#troubleshooting)
@@ -44,6 +45,7 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 > | StretchCluster + NodePool CRs applied, broker pods Running | ✅ |
 > | All 5 brokers in cluster, controller leader on rp-aws | ✅ `rpk cluster health` reports `Healthy: true`, 5 nodes, 0 leaderless partitions |
 > | Cross-cloud produce / consume (`cross-cloud-test` topic, partitions=5, replicas=5) | ✅ produce on AWS → consume on GCP, produce on Azure → consume on AWS |
+> | Demo add-ons (Console + ~30 MB/s OMB + kube-prometheus-stack) — see [Step 9](#9-demo-add-ons-console-omb-load-prometheus--grafana) | 🟡 Automation landed 2026-05-03; not yet end-to-end validated |
 >
 > **TLS at the broker layer is intentionally `enabled: false`** — filed upstream as [redpanda-data/redpanda-operator#1499](https://github.com/redpanda-data/redpanda-operator/issues/1499). Short version: the operator's auto-generated cert SANs (`*.redpanda`, `*.redpanda.svc`) violate RFC-6125 for single-label parents and OpenSSL fails hostname verification on the advertised broker hostname (`redpanda-rp-gcp-0.redpanda` etc.); brokers complete the TLS handshake then drop the RPC with `rpc::errc:4` / "Broken pipe". The cross-cloud hop is already IPsec-encrypted by the VPN tunnels (see [Architecture → How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted)), so `tls.enabled: false` is encryption-equivalent for that hop. Re-enabling broker TLS cleanly across clusters needs the operator change proposed in #1499 (emit explicit per-broker SANs, or skip hostname verification on cross-cluster RPC clients).
 >
@@ -143,12 +145,24 @@ Within a single cluster the broker traffic stays inside that cloud's VPC/VNet �
 │   └── helm-values/
 ├── vpn/
 │   └── terraform/              # 3-way mesh of IPsec tunnels + BGP peers (multi-cloud TF root)
+├── console/
+│   └── values.yaml             # Console helm values: PLAINTEXT, points at the headless redpanda Service
+├── omb/
+│   ├── producer-job.yaml       # ~30 MB/s kafka-perf-test producer (Job in the redpanda namespace)
+│   ├── consumer-job.yaml       # matching consumer
+│   └── README.md
+├── monitoring/
+│   ├── values.yaml             # kube-prometheus-stack values: Grafana LB + dashboard sidecar
+│   └── redpanda-scrape.yaml    # cross-cluster scrape config (Endpoints SD on the redpanda Service)
 └── scripts/
     ├── install-cilium.sh       # per-cloud Cilium install
     ├── connect-mesh.sh         # enable + connect 3-way Cilium ClusterMesh
     ├── apply-vpn.sh            # collects per-cloud TF outputs and applies vpn/terraform
     ├── bootstrap-redpanda.sh   # cert-manager + license secret + node annotations
-    └── teardown.sh             # full multi-cloud teardown
+    ├── install-console.sh      # Console on rp-aws (LB + URL printed at end)
+    ├── install-omb.sh          # creates load-test topic + applies OMB Jobs (~30 MB/s)
+    ├── install-monitoring.sh   # kube-prometheus-stack + Redpanda dashboard, prints Grafana URL+creds
+    └── teardown.sh             # full multi-cloud teardown (uninstalls demo addons first)
 ```
 
 ## Prerequisites
@@ -379,6 +393,46 @@ kubectl --context rp-gcp -n redpanda exec -it redpanda-rp-gcp-0 -c redpanda -- \
   rpk topic consume cross-cloud-test --num 1
 ```
 
+### 9. Demo add-ons: Console, OMB load, Prometheus + Grafana
+
+These three add-ons turn the bare cross-cloud StretchCluster into a presentable demo: a single Redpanda Console UI for the topic / partition / consumer-group view, a ~30 MB/s OMB-equivalent workload so failover behavior is visible under real load, and a Prometheus + Grafana stack scraping all 5 brokers across 3 clouds with the published Redpanda dashboard pre-imported.
+
+All three install on **rp-aws only** — the controller is pinned there (`default_leaders_preference: "racks:aws"`), and the operator's flat-mode EndpointSlices put every peer broker pod IP into rp-aws's headless `redpanda` Service, so a single Console / Prometheus reaches the whole stretch cluster without per-cluster federation.
+
+**Order matters once** — install monitoring before OMB if you want the steady-state baseline panels populated before load arrives; install Console before OMB if you want to watch `load-test` populate from zero. Otherwise any order works.
+
+```bash
+./scripts/install-console.sh        # Redpanda Console on rp-aws
+./scripts/install-monitoring.sh     # kube-prometheus-stack on rp-aws
+./scripts/install-omb.sh            # ~30 MB/s producer + consumer Jobs
+```
+
+Each script provisions its own LoadBalancer (NLB on AWS), waits for it to come up, and prints the URL + login at the end. **Nothing about credentials is committed to the repo** — Grafana's admin password is auto-generated by the chart and read out of the in-cluster `monitoring-grafana` Secret only at print time. If you want to re-print them later:
+
+```bash
+# Console URL (Console OSS — no login)
+kubectl --context rp-aws -n console get svc console \
+  -o jsonpath='http://{.status.loadBalancer.ingress[0].hostname}:8080{"\n"}'
+
+# Grafana URL + admin password
+kubectl --context rp-aws -n monitoring get svc monitoring-grafana \
+  -o jsonpath='http://{.status.loadBalancer.ingress[0].hostname}{"\n"}'
+kubectl --context rp-aws -n monitoring get secret monitoring-grafana \
+  -o jsonpath='{.data.admin-password}' | base64 -d; echo
+```
+
+What each piece is doing under the hood:
+
+| Add-on | Chart / image | Where load lands | Demo signal |
+|---|---|---|---|
+| **Console** | `redpanda/console` helm chart, namespace `console`, exposed via `Service: type=LoadBalancer` (NLB) | n/a — read-only UI | Topics → `load-test` shows partition leadership across racks (`aws` / `gcp` / `azure`); consumer group `omb-consumer` shows lag spike + recover during failover |
+| **OMB workload** | `apache/kafka:3.8.0` Job, `kafka-producer-perf-test --throughput 7680 --record-size 4096` | `redpanda` namespace on rp-aws — leaders for the 24 partitions distribute across racks per the operator's leader-balancer | `kubectl logs -f job/omb-producer` shows per-5s `records sent / records/sec / avg latency / max latency`. A regional cordon → ~5–30 s producer stall → return to ~7680 records/sec |
+| **Prometheus + Grafana** | `prometheus-community/kube-prometheus-stack`, namespace `monitoring`, Grafana exposed via NLB | scrapes `redpanda.redpanda.svc.cluster.local:9644/public_metrics` (Endpoints SD), reaches all 5 brokers thanks to flat-mode EndpointSlices + Cilium ClusterMesh | Dashboards → Redpanda → "Kubernetes Redpanda" — produce/consume MB/s, p50/p95/p99 latency, leader count by rack, URP / leader-elections panels light up during region failover |
+
+The OMB target rate is 30 MB/s with 4 KiB records — see [`omb/README.md`](omb/README.md) for the rate-tuning matrix if you want a different number, and the same notes on stopping / re-applying the Jobs.
+
+> **No credentials in the repo.** `.gitignore` covers `*.local.yaml`, `console-creds.txt`, and `grafana-creds.txt` so any pinned override files stay out of git. The install scripts never write credentials to disk — they print to stderr once and leave the auto-generated values in their respective in-cluster Secrets (`monitoring-grafana`).
+
 ## Cost
 
 Rough estimate (`us-east-1` / `us-east1` / `eastus`):
@@ -396,7 +450,8 @@ Rough estimate (`us-east-1` / `us-east1` / `eastus`):
 | Azure VPN Gateway (VpnGw1 sku) | $0.19 |
 | Cross-cloud LBs (3× NLB / Standard LB) | ~$0.07 |
 | Cilium clustermesh-apiserver LB (3 of) | ~$0.05 |
-| **Compute + VPN + LB subtotal** | **~$2.05/hr** |
+| Console + Grafana NLBs on rp-aws (step 9, only when running the demo addons) | ~$0.04 |
+| **Compute + VPN + LB subtotal** | **~$2.09/hr** |
 
 On top: **inter-cloud egress** at the ~$0.05–$0.15/GB tier on every provider. Even idle, broker-to-broker raft heartbeats + Cilium clustermesh-apiserver sync + BGP keepalives add up. Plan for **$5–$30/day in egress** alone for a quiet test cluster, much more under load.
 

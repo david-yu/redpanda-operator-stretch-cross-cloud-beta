@@ -8,6 +8,14 @@ values-rp-azure.yaml
 clustermesh-apiserver-ca.crt
 *.kubeconfig
 
+# Local-only Helm value overrides for the demo addons (Console / Grafana).
+# install-monitoring.sh prints the auto-generated Grafana admin password
+# rather than writing it anywhere — but if you choose to pin it for
+# reproducibility, drop it in *.local.yaml and never check it in.
+*.local.yaml
+console-creds.txt
+grafana-creds.txt
+
 # Local logs / scratch
 *.log
 *.bak

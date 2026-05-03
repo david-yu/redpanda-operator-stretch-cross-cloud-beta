@@ -1,0 +1,65 @@
+# OMB-equivalent consumer that drains the load-test topic at producer rate
+# (~30 MB/s). PLAINTEXT — broker TLS is off in this scaffold (see
+# producer-job.yaml).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: omb-consumer
+  namespace: redpanda
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: consumer-config
+          configMap:
+            name: omb-consumer-config
+      containers:
+        - name: consumer
+          image: apache/kafka:3.8.0
+          volumeMounts:
+            - name: consumer-config
+              mountPath: /etc/kafka/consumer.properties
+              subPath: consumer.properties
+              readOnly: true
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              for i in $(seq 1 30); do
+                getent hosts redpanda.redpanda.svc.cluster.local && break
+                sleep 2
+              done
+              exec /opt/kafka/bin/kafka-consumer-perf-test.sh \
+                --topic load-test \
+                --messages 138240000 \
+                --reporting-interval 5000 \
+                --show-detailed-stats \
+                --group omb-consumer \
+                --timeout 600000 \
+                --consumer.config /etc/kafka/consumer.properties \
+                --bootstrap-server redpanda.redpanda.svc.cluster.local:9092
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: omb-consumer-config
+  namespace: redpanda
+data:
+  consumer.properties: |
+    security.protocol=PLAINTEXT
+    group.id=omb-consumer
+    auto.offset.reset=earliest
+    enable.auto.commit=true
+    auto.commit.interval.ms=5000
+    fetch.min.bytes=65536
+    max.partition.fetch.bytes=10485760

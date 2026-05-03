@@ -1,0 +1,86 @@
+# Helm values for prometheus-community/kube-prometheus-stack, deployed in
+# the `monitoring` namespace on rp-aws.
+#
+# Why a single Prometheus on rp-aws (not one per cluster):
+# the StretchCluster operator runs in flat cross-cluster mode, so the
+# headless `redpanda` Service in this cluster's redpanda namespace has
+# EndpointSlices for *all 5 broker pod IPs* (2 AWS + 2 GCP + 1 Azure).
+# Cilium ClusterMesh routes pod-to-pod across clouds. So a single
+# Prometheus on rp-aws can scrape every broker's /public_metrics directly
+# via its peer pod IP, without per-cluster federation or Thanos.
+#
+# Disable Alertmanager (no alerting policies in this scaffold) and
+# kubeControllerManager / kubeScheduler / kubeEtcd (managed-K8s control
+# planes don't expose those scrape targets).
+crds:
+  enabled: true
+
+alertmanager:
+  enabled: false
+
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false  # eBPF kubeProxyReplacement is on — there's no kube-proxy
+
+prometheus:
+  prometheusSpec:
+    # Pick up any ServiceMonitor / PodMonitor regardless of release label
+    # (the chart defaults to "release: <release>" matching). Demo-friendly.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    # Cross-cluster scrape config: pick up the redpanda headless Service's
+    # EndpointSlices. With flat mode, those include all peer broker pod IPs.
+    additionalScrapeConfigsSecret:
+      enabled: true
+      name: redpanda-additional-scrape-configs
+      key: scrape.yaml
+    retention: 6h
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+
+grafana:
+  enabled: true
+  adminUser: admin
+  # adminPassword left unset → chart auto-generates a random one and stores
+  # it in the `<release>-grafana` Secret under key `admin-password`.
+  # install-monitoring.sh reads that secret at the end and prints it.
+  service:
+    type: LoadBalancer
+    port: 80
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+  defaultDashboardsEnabled: true
+  # The dashboard sidecar picks up any ConfigMap with this label and
+  # provisions it as a Grafana dashboard automatically. We label
+  # monitoring/redpanda-dashboard-cm.yaml with grafana_dashboard=1 so the
+  # Redpanda dashboard shows up without manual import.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      folder: Redpanda
+    datasources:
+      enabled: true
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
