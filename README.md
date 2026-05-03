@@ -188,7 +188,13 @@ The flow is:
 
 ### 1. Bring up the three clusters + VPN gateways
 
-Each cloud's Terraform brings up a Kubernetes cluster with **no CNI installed** plus the cloud's VPN gateway (no peer connections yet — those come from `vpn/terraform/` in step 2). Nodes report `NotReady` until you install Cilium in step 4 — that's expected.
+Each cloud's Terraform brings up a Kubernetes cluster plus the cloud's VPN gateway (no peer connections yet — those come from `vpn/terraform/` in step 2). What gets installed on the CNI side is cloud-specific:
+
+- **AWS** — `bootstrap_self_managed_addons = false` keeps the *self-managed* aws-node DaemonSet out, but the EKS *managed* `vpc-cni` and `coredns` addons still install (the chart's `cluster_addons` block adds them by default). Nodes come up `Ready` with VPC CNI doing pod networking. Cilium install (step 4) deletes the `aws-node` DaemonSet first and takes over.
+- **GCP** — GKE always installs a CNI (kubenet on `LEGACY_DATAPATH`). Nodes come up `Ready`. Cilium install evicts kubenet-assigned pods so they re-attach under Cilium.
+- **Azure** — `network_plugin = "none"` (BYOCNI) means there is *no* CNI on AKS until step 4. Azure nodes are the only ones that report `NotReady` until Cilium installs.
+
+So `kubectl get nodes` after step 1 shows: rp-aws / rp-gcp = Ready, rp-azure = NotReady. All become Ready after step 4.
 
 ```bash
 # AWS — ~12-15 min for EKS + VGW
