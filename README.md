@@ -21,6 +21,7 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
   - [7. Install the operator + apply StretchCluster on each cluster](#7-install-the-operator--apply-stretchcluster-on-each-cluster)
   - [8. Validate](#8-validate)
   - [9. Demo add-ons: Console, OMB load, Prometheus + Grafana](#9-demo-add-ons-console-omb-load-prometheus--grafana)
+- [Demo A: leader pinning + cross-cloud failover fallthrough](#demo-a-leader-pinning--cross-cloud-failover-fallthrough)
 - [Cost](#cost)
 - [Tear down](#tear-down)
 - [Troubleshooting](#troubleshooting)
@@ -432,6 +433,167 @@ What each piece is doing under the hood:
 The OMB target rate is 30 MB/s with 4 KiB records — see [`omb/README.md`](omb/README.md) for the rate-tuning matrix if you want a different number, and the same notes on stopping / re-applying the Jobs.
 
 > **No credentials in the repo.** `.gitignore` covers `*.local.yaml`, `console-creds.txt`, and `grafana-creds.txt` so any pinned override files stay out of git. The install scripts never write credentials to disk — they print to stderr once and leave the auto-generated values in their respective in-cluster Secrets (`monitoring-grafana`).
+
+## Demo A: leader pinning + cross-cloud failover fallthrough
+
+> Adapted from the same-cloud beta's [Demo A: leader pinning + region-failure fallthrough](https://github.com/david-yu/redpanda-operator-stretch-beta#demo-a-leader-pinning--region-failure-fallthrough). Same shape — cordon the primary, watch leadership relocate, restore — but the rack labels are *cloud names* (`aws` / `gcp` / `azure`) and the failure boundary is an entire cloud's K8s cluster.
+
+The committed `<cloud>/manifests/stretchcluster.yaml` configures rack-aware leader pinning with an **ordered** failover list — primary cloud first, then the next-lowest-RTT cloud, then the last:
+
+```yaml
+rackAwareness:
+  enabled: true
+  nodeAnnotation: redpanda.com/cloud   # rack = cloud name (aws / gcp / azure)
+
+config:
+  cluster:
+    # Ordered preference. Leaders sit in the first reachable rack and fall
+    # over to the next listed rack on outage (Redpanda 26.1+ ordered_racks).
+    default_leaders_preference: "ordered_racks:aws,gcp,azure"
+```
+
+`bootstrap-redpanda.sh` annotates every node with `redpanda.com/cloud=<aws|gcp|azure>` (from step 6), so each broker's rack is the cloud it lives in (one rack per cloud). With the 2 / 2 / 1 broker layout (RF=5), a single-cloud outage leaves quorum with 3 brokers and leadership relocates to the next reachable rack in the priority list.
+
+> **Run continuous load (recommended).** Apply the [`omb/`](omb/) Jobs *before* starting Demo A so the producer + consumer are at steady state when you cordon the primary cloud. The producer's per-5s throughput line stalls for ~5–30 s during leader re-election then returns to ~7680 records/sec — that's the visible proof the cluster kept serving traffic across a full-cloud failure. The same window shows in Grafana as a leader-count flip from `rack=aws` to `rack=gcp` and a brief consumer-lag spike.
+>
+> ```bash
+> ./scripts/install-omb.sh    # creates load-test, starts producer + consumer
+> # then proceed with the demo steps below — load is running in the background
+> ```
+
+**Step 1 — verify rack labels are populated**
+
+```bash
+kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
+  rpk redpanda admin brokers list
+```
+
+Expected — every broker has a `RACK` value matching its cloud:
+
+```
+ID    HOST                          PORT   RACK   CORES  MEMBERSHIP  IS-ALIVE  VERSION  UUID
+0     redpanda-rp-aws-0.redpanda    33145  aws    4      active      true      26.2.1   52351fe6-…
+1     redpanda-rp-aws-1.redpanda    33145  aws    4      active      true      26.2.1   78f90065-…
+2     redpanda-rp-gcp-0.redpanda    33145  gcp    4      active      true      26.2.1   72ecf5ff-…
+3     redpanda-rp-gcp-1.redpanda    33145  gcp    4      active      true      26.2.1   3bda1c04-…
+4     redpanda-rp-azure-0.redpanda  33145  azure  4      active      true      26.2.1   bad54b3e-…
+```
+
+Broker IDs are assigned by Redpanda in join order, so the exact `ID → cloud` mapping may differ on your run if brokers come up in a different order. From here on, prefer rack-name lookups over hardcoded IDs:
+
+```bash
+# Capture rack → broker-ID mapping into shell vars for the rest of the demo:
+rack_ids() {
+  kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
+    rpk redpanda admin brokers list 2>/dev/null \
+    | awk -v r="$1" 'NR>1 && $4==r {print $1}' | xargs
+}
+AWS_IDS=$(rack_ids aws)     # e.g. "0 1"
+GCP_IDS=$(rack_ids gcp)     # e.g. "2 3"
+AZURE_IDS=$(rack_ids azure) # e.g. "4"
+echo "aws=$AWS_IDS gcp=$GCP_IDS azure=$AZURE_IDS"
+```
+
+**Step 2 — create the demo topic and watch leaders concentrate in the AWS rack**
+
+A 12-partition topic with RF=5 (every partition has a replica on every broker):
+
+```bash
+kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
+  rpk topic create leader-pinning-demo --partitions 12 --replicas 5
+```
+
+Wait ~60 s for the leader balancer to converge, then tally leaders by broker:
+
+```bash
+sleep 60
+kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
+  rpk topic describe leader-pinning-demo -p | awk 'NR>1 {print $2}' | sort | uniq -c
+```
+
+Expected — all 12 leaders on the two AWS-rack brokers (`$AWS_IDS`), evenly split:
+
+```
+   6 0
+   6 1
+```
+
+If you have Console up (`./scripts/install-console.sh`), Topics → `leader-pinning-demo` shows the same picture visually with the rack column populated, and the same view auto-updates as leadership moves in step 4.
+
+**Step 3 — simulate the AWS cloud failing**
+
+Patching the `NodePool` to `replicas: 0` triggers a *graceful* decommission, which stalls under RF=5 (autobalancer has nowhere to land replicas). Likewise `kubectl scale sts redpanda-rp-aws --replicas=0` is fought back by the operator's reconcile loop within ~60 s.
+
+For a true cloud-outage simulation (brokers unreachable, no graceful drain), cordon every node in rp-aws and delete the broker pods so they sit `Pending`:
+
+```bash
+for N in $(kubectl --context rp-aws get nodes -o name); do
+  kubectl --context rp-aws cordon "$N"
+done
+kubectl --context rp-aws -n redpanda delete pod \
+  redpanda-rp-aws-0 redpanda-rp-aws-1 --grace-period=10
+```
+
+**Step 4 — confirm leaders fall through to the GCP rack**
+
+Wait ~2 min for the controller to mark AWS brokers unreachable (well under the `partition_autobalancing_node_availability_timeout_sec: 600` we set, so they don't get auto-decommissioned mid-demo) and for the leader balancer to relocate leaders. Run the tally from a *surviving* cluster (rp-aws's API is gone):
+
+```bash
+sleep 120
+kubectl --context rp-gcp -n redpanda exec redpanda-rp-gcp-0 -c redpanda -- \
+  rpk topic describe leader-pinning-demo -p | awk 'NR>1 {print $2}' | sort | uniq -c
+```
+
+Expected — leadership has fallen through to `ordered_racks`'s rank-2 rack (gcp), brokers `$GCP_IDS`:
+
+```
+   6 2
+   6 3
+```
+
+If you see something like `4 2 / 4 3 / 4 4` mid-window, that's the leader balancer mid-convergence — broker 4 (`azure`, rank 3) is briefly used as a holder while replicas catch up. Wait another 30–60 s; leadership consolidates on the highest-priority *reachable* rack (gcp) once partitions are re-replicated.
+
+> **Cross-cloud heartbeat caveat (Azure landing). ** With AWS brokers down, the controller raft re-elects, and there's a non-trivial chance it lands on broker 4 (`azure`). For our `us-east-1` / `us-east1` / `eastus` triple this is fine — every pairwise RTT stays under the 100 ms `node_status_rpc` timeout — but if you swap any region for one that pushes a pair over 100 ms (e.g., Azure `westeurope`), the controller will silently mark the > 100 ms-distant brokers `IS-ALIVE=false` even when they're healthy, and the autobalancer makes decisions on the wrong data. Keep all three regions on the same continent and the chained-controller path stays under budget.
+
+**Watch it in Console / Grafana while the demo runs.**
+
+| Surface | What to point at | What to expect |
+|---|---|---|
+| **Console** → Topics → `leader-pinning-demo` → Partitions | The leader column for every partition | Flips from broker IDs in rack=aws (step 2) to rack=gcp (step 4), then back to rack=aws (step 5) |
+| **Console** → Topics → `load-test` → Consumer Groups → `omb-consumer` | Lag column | ~0 in steady state; spikes during the cordon window; drains back to ~0 once leaders relocate |
+| **Grafana** → Redpanda → "Kubernetes Redpanda" → throughput panels | Per-rack produce / consume MB/s | Sustained ~30 MB/s with a brief dip during leader re-election |
+| **Grafana** → same dashboard → leader-count panels | Leader count by rack | Steps from `aws=12, gcp=0, azure=0` to `aws=0, gcp=12, azure=0` and back |
+| **`kubectl logs -f job/omb-producer`** | Per-5s `records sent / records/sec / avg latency / max latency` | Throughput pauses for ~5–30 s during leader migration, then returns to ~7680 records/sec |
+
+**Step 5 — restore AWS and watch leaders return**
+
+Uncordon the rp-aws nodes; the pending broker pods schedule immediately:
+
+```bash
+for N in $(kubectl --context rp-aws get nodes -o name); do
+  kubectl --context rp-aws uncordon "$N"
+done
+```
+
+Brokers rejoin (~60 s), partitions catch up, the leader balancer moves leaders back to AWS (rank 1 in `ordered_racks`). After ~2 min:
+
+```bash
+kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
+  rpk topic describe leader-pinning-demo -p | awk 'NR>1 {print $2}' | sort | uniq -c
+```
+
+```
+   6 0
+   6 1
+```
+
+Console / Grafana show the leader-count panel flip back to `aws=12, gcp=0, azure=0`. The `omb-consumer` group's lag (which spiked during the cordon window) drains within seconds — that's the visible end-to-end signal that the cluster rode through a full-cloud outage with continuous client traffic.
+
+**Caveats observed in this scaffold:**
+
+- **Leader balancer stalls during under-replicated periods.** When a whole cloud's brokers go away, the balancer pauses while the cluster is recovering, then resumes once partitions are re-replicated. Expect 30–90 s of "leaders not yet redistributed" while replicas are being rebuilt elsewhere.
+- **EKS NLBs may be reaped during long cordons.** If you keep AWS cordoned for more than ~10–15 min, the AWS Load Balancer Controller (whose pods are also Pending on cordoned nodes) stops reconciling, and any LB it owns can be reaped by the cloud LB controller. The `rp-aws-multicluster-peer` LB is the one that matters — if it's gone, the rp-gcp / rp-azure operator pods drop their AWS-peer connection until you uncordon and the LB is recreated. For Demo A's short cycle this doesn't bite; it does for Demo B (which deliberately leaves AWS down).
+- **`rpk redpanda admin brokers list` may briefly show un-affected brokers as `IS-ALIVE=false`.** During transitions, cross-cloud heartbeats can flap. Confirm against `rpk cluster health` (`Nodes down:` field), which uses the controller's authoritative view — except when the controller itself sits across a > 100 ms RTT line (see the Azure caveat above).
 
 ## Cost
 

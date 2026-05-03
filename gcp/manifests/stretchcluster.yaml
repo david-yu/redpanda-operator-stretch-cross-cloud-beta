@@ -59,10 +59,12 @@ spec:
       key: license.key
   config:
     cluster:
-      # See aws/manifests/stretchcluster.yaml for the rationale: pin to a
-      # single rack (aws) so the controller stays in the lowest-RTT cloud.
-      default_leaders_preference: "racks:aws"
-      partition_autobalancing_node_availability_timeout_sec: 30
-      partition_autobalancing_node_autodecommission_timeout_sec: 60
+      # See aws/manifests/stretchcluster.yaml for the rationale: ordered
+      # rack preference pins leaders to AWS in steady state, falls through
+      # to GCP then Azure on outage. ordered_racks (Redpanda 26.1+) is a
+      # priority list, unlike the older racks: which distributes equally.
+      default_leaders_preference: "ordered_racks:aws,gcp,azure"
+      partition_autobalancing_node_availability_timeout_sec: 600
+      partition_autobalancing_node_autodecommission_timeout_sec: 900
       partition_autobalancing_mode: continuous
       partition_autobalancing_max_disk_usage_percent: 80

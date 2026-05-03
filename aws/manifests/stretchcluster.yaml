@@ -95,19 +95,29 @@ spec:
       key: license.key
   config:
     cluster:
-      # Pin leaders (and controller) to the AWS rack. NOTE: when multiple
-      # racks are listed, Redpanda distributes leaders *equally* across
-      # them (per cluster-properties docs) — there is NO priority
-      # fallback. So a single-rack value is what actually pins leaders;
-      # listing all three clouds spreads leadership 1/3 to each which
-      # adds cross-cloud egress for every produce. For our triple,
-      # us-east-1 (aws) has the lowest sum-of-pairwise-RTT to us-east1
-      # (gcp ~12ms) and eastus (azure ~5ms), so it's also the safest
-      # rack to keep the controller in.
-      default_leaders_preference: "racks:aws"
-      # Demo-friendly autobalancer timeouts. Production: raise both
-      # substantially (Redpanda's defaults are 900 / 600).
-      partition_autobalancing_node_availability_timeout_sec: 30
-      partition_autobalancing_node_autodecommission_timeout_sec: 60
+      # Pin leaders to AWS in steady state, fall through to GCP then Azure
+      # on outage. The two prefix forms have different semantics — the
+      # older `racks:<r1>,<r2>,…` is a *constrained set* (leaders distribute
+      # equally across listed racks, no priority order); `ordered_racks:`
+      # (Redpanda 26.1+, see leader-pinning docs) is a priority list:
+      # leaders sit in the first reachable rack and fall over to each
+      # subsequent rack only when higher-priority racks are unavailable.
+      #
+      # us-east-1 (aws) has the lowest sum-of-pairwise-RTT to us-east1 gcp
+      # (~12ms) and eastus azure (~5ms), so it's the safest rack to keep
+      # leaders + the controller in steady-state. GCP comes second because
+      # the AWS↔GCP and GCP↔Azure RTTs are both under the 100ms hardcoded
+      # `node_status_rpc` timeout (Azure↔AWS is the marginal pair, so
+      # demoting Azure to last protects the controller's heartbeat budget
+      # if leadership ever ends up there during a chained outage).
+      default_leaders_preference: "ordered_racks:aws,gcp,azure"
+      # Demo-friendly autobalancer timeouts. Sized so Demo A's 5-7 min
+      # cordon → observe → uncordon cycle finishes BEFORE the autobalancer
+      # marks the cordoned brokers unavailable / autodecommissions them.
+      # Demo B (autodecommission) wants autodecom_timeout finite, hence the
+      # 15-min cap. Production: raise both substantially — a transient
+      # regional blip shouldn't trigger an automatic decommission.
+      partition_autobalancing_node_availability_timeout_sec: 600
+      partition_autobalancing_node_autodecommission_timeout_sec: 900
       partition_autobalancing_mode: continuous
       partition_autobalancing_max_disk_usage_percent: 80
