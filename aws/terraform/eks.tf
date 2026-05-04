@@ -138,6 +138,39 @@ resource "aws_security_group_rule" "peer_cloud_all" {
   description       = "all from peer cloud CIDR (VPN-routed) ${each.value}"
 }
 
+# CSI-backed default StorageClass. Required because EKS' bundled `gp2`
+# class still references the in-tree `kubernetes.io/aws-ebs` provisioner
+# which was removed in 1.34, and the aws-ebs-csi-driver addon doesn't
+# install its own default class. Without this, broker PVCs (issued by
+# the operator without an explicit storageClassName) sit Pending forever
+# with `no persistent volumes available for this claim and no storage
+# class is set`. Drift caught during 2026-05-03 e2e validation; was a
+# manual `kubectl apply` step before this got codified.
+#
+# `WaitForFirstConsumer` matches the EKS-default gp2 binding mode so
+# pods get a volume in the same AZ as the pod is scheduled to.
+resource "kubernetes_storage_class_v1" "ebs_sc" {
+  metadata {
+    name = "ebs-sc"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" = "true"
+    }
+  }
+  storage_provisioner    = "ebs.csi.aws.com"
+  volume_binding_mode    = "WaitForFirstConsumer"
+  allow_volume_expansion = true
+  parameters = {
+    type      = "gp3"
+    encrypted = "true"
+  }
+
+  # Force ordering: the aws-ebs-csi-driver addon must be reconciled before
+  # this SC is applied, otherwise the provisioner has no controller and
+  # the first PVC binding hangs. The addon is keyed under the EKS module's
+  # cluster_addons map, so we depend on the module as a whole.
+  depends_on = [module.eks]
+}
+
 # Allow ALL traffic from the node SG to itself. The terraform-aws-modules/eks
 # v20 module's default node SG only opens TCP 1025-65535 + DNS from self —
 # which is enough for kubelet/CoreDNS but BLOCKS ICMP and other in-VPC pod
