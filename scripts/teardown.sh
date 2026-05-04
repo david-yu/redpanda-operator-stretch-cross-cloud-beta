@@ -294,6 +294,21 @@ for r in to-rp-aws-via-vpn to-rp-azure-via-vpn; do
   gcloud compute routes delete "$r" --project "$GCP_PROJECT" --quiet 2>/dev/null \
     && log "    deleted gcp route: $r" || true
 done
+# google_compute_external_vpn_gateway is a *global* GCP resource, not
+# regional. If vpn/terraform destroy fails AND we fall back to
+# `terraform state rm` (the only path when destroy fails late), the
+# in-cloud objects survive — they aren't anchored to a regional
+# router or to per-cloud TF state. The next vpn/terraform apply then
+# 409s on `The resource '...' already exists, alreadyExists`. Caught
+# during 2026-05-03 e2e v2 re-run after a v1 teardown that did the
+# state-rm fallback. Idempotent delete here so repeat teardowns are
+# safe.
+log "  GCP — delete orphan external VPN gateways (survive state-rm fallback)"
+for ext in rp-aws-ext-gw rp-azure-ext-gw; do
+  gcloud compute external-vpn-gateways delete "$ext" \
+    --project "$GCP_PROJECT" --quiet 2>/dev/null \
+    && log "    deleted gcp external-vpn-gateway: $ext" || true
+done
 log "  Azure — delete VPN connections (frees the virtual_network_gateway for delete)"
 for c in to-rp-aws to-rp-gcp; do
   az network vpn-connection delete --resource-group rp-aws-cross-cloud --name "$c" 2>/dev/null \

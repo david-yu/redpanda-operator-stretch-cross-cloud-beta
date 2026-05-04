@@ -12,7 +12,13 @@
 #
 # Set AWS_PROFILE / AZURE-creds / gcloud-creds in your shell first.
 
-set -uo pipefail
+set -euo pipefail
+# `-e` ensures terraform apply / output errors propagate. Earlier
+# version (`-uo` only) silently exited 0 when `terraform apply` hit a
+# 409 already-exists on the GCP-side external_vpn_gateway resources
+# left over from a prior partial-teardown run — the operator only
+# noticed when cross-cloud pings to GCP timed out 60s later. Caught
+# during 2026-05-03 e2e v2.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd -- "$SCRIPT_DIR/.." && pwd)
