@@ -150,7 +150,8 @@ Within a single cluster the broker traffic stays inside that cloud's VPC/VNet �
     ├── install-cilium.sh       # per-cloud Cilium install
     ├── connect-mesh.sh         # enable + connect 3-way Cilium ClusterMesh
     ├── apply-vpn.sh            # collects per-cloud TF outputs and applies vpn/terraform
-    ├── bootstrap-redpanda.sh   # cert-manager + license secret + node annotations
+    ├── bootstrap-redpanda.sh   # cert-manager + license secret + node annotations (initial)
+    ├── annotate-rack.sh        # idempotent re-annotation of nodes — re-run after any GKE/EKS/AKS resize, autoscaler add, or Demo B capacity-injection step
     ├── install-console.sh      # Console on rp-aws (LB + URL printed at end)
     ├── install-omb.sh          # creates load-test topic + applies OMB Jobs (\~30 MB/s)
     ├── install-monitoring.sh   # kube-prometheus-stack + Redpanda dashboard, prints Grafana URL+creds
@@ -681,7 +682,18 @@ kubectl --context rp-azure -n redpanda exec redpanda-rp-azure-0 -c redpanda -- r
 
 **Step 3 — inject capacity by scaling up the rp-gcp NodePool**
 
-Same-cloud Demo B step 3 brings up a whole new K8s cluster here. The cross-cloud variant scales an existing NodePool — same outcome (5 reachable brokers), much less plumbing:
+Same-cloud Demo B step 3 brings up a whole new K8s cluster here. The cross-cloud variant scales an existing NodePool — same outcome (5 reachable brokers), much less plumbing.
+
+> **Pre-req: GKE cluster needs ≥4 nodes.** With `gcp/terraform`'s default `node_count = 2` per zone (6 nodes total), there's headroom. If you're upgrading from the pre-2026-05-04 default of `node_count = 1` (3 nodes total) you need to bump GKE first, otherwise the 4th broker pod sits `Pending` with cluster-autoscaler reporting `Pod didn't trigger scale-up`:
+>
+> ```bash
+> # If running on the old 3-node default, resize first:
+> gcloud container clusters resize rp-gcp --node-pool default \
+>   --num-nodes 2 --region us-east1 --project <your-gcp-project> --quiet
+> # Then re-annotate the new nodes (bootstrap-redpanda.sh only annotates
+> # at bootstrap time; new nodes from a resize come up unannotated):
+> ./scripts/annotate-rack.sh
+> ```
 
 ```bash
 kubectl --context rp-gcp -n redpanda patch nodepool rp-gcp \

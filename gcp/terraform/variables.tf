@@ -59,9 +59,9 @@ variable "machine_type" {
 }
 
 variable "node_count" {
-  description = "Per-zone node count for the regional node pool. Regional clusters distribute this to each of the region's zones (typically 3), so node_count=1 → 3 nodes total — enough for the 2 broker pods + Cilium + cert-manager + operator."
+  description = "Per-zone node count for the regional node pool. Regional clusters distribute this to each of the region's zones (typically 3), so node_count=2 → 6 nodes total. Steady state needs only 3 nodes (2 broker pods + Cilium + cert-manager + operator), but Demo B's NodePool scale-up patches replicas: 2 → 4, which needs at least 4 schedulable nodes for the new broker pods (StatefulSet pod-anti-affinity prevents stacking on existing nodes). 6 nodes gives headroom; drop to 1 if you don't plan to run Demo B. Caught during 2026-05-04 e2e v3 — scale-up hit `Pod didn't trigger scale-up` because the cluster wasn't autoscaled and only had 3 nodes."
   type        = number
-  default     = 1
+  default     = 2
 }
 
 variable "node_disk_size_gb" {
