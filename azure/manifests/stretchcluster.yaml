@@ -68,3 +68,12 @@ spec:
       partition_autobalancing_node_autodecommission_timeout_sec: 900
       partition_autobalancing_mode: continuous
       partition_autobalancing_max_disk_usage_percent: 80
+      # See aws/manifests/stretchcluster.yaml for rationale: 1-hour retention
+      # keeps disk pressure bounded under the OMB 30 MB/s demo workload.
+      log_retention_ms: 3600000
+  # 200Gi per-broker PVC; chart default of 20Gi is too small for the demo
+  # workload. See aws/manifests/stretchcluster.yaml for the math.
+  storage:
+    persistentVolume:
+      enabled: true
+      size: 200Gi

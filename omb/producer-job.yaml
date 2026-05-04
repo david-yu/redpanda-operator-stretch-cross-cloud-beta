@@ -69,7 +69,10 @@ metadata:
   namespace: redpanda
 data:
   producer.properties: |
-    bootstrap.servers=redpanda.redpanda.svc.cluster.local:9092
+    # Port 9093, NOT 9092: the operator keeps the TLS-conventional port
+    # number even with `tls.enabled: false`. Confirmed via the redpanda
+    # headless Service spec.
+    bootstrap.servers=redpanda.redpanda.svc.cluster.local:9093
     security.protocol=PLAINTEXT
     # acks=all so a regional outage is visible in the producer's metrics
     # (the producer blocks on min.insync.replicas instead of silently

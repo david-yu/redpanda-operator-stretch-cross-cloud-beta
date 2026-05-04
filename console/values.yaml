@@ -1,0 +1,74 @@
+# Helm values for the Redpanda Console chart (redpanda/console, chart
+# version 3.7.0+).
+#
+# Why helm chart and not the operator-managed Console CR:
+# the multicluster-mode operator we deploy (`redpanda-data/operator
+# --version 26.2.1-beta.1`, started with `multicluster` as its top-level
+# subcommand) only ships the StretchCluster reconciler. Its `Console`
+# CRD ships with the chart but no controller in this operator binary
+# watches the CR — applying a `Console.cluster.redpanda.com/v1alpha2`
+# results in the CR sitting with empty `status` indefinitely (no
+# Deployment / Service ever created). Tracked as K8S-846. Helm chart
+# is the pragmatic path here. Drift caught during 2026-05-03 e2e
+# validation.
+#
+# Schema note: chart 3.7.0 puts `config: {}` at the *top level* (not
+# under a `console:` key as older chart versions / the docs page
+# example imply). `config:` is the literal `Config.yaml` content the
+# Console binary loads at startup.
+#
+# Targets the cross-cloud StretchCluster from inside rp-aws. The
+# operator's flat-mode EndpointSlices ensure the headless `redpanda` Service
+# on this cluster resolves to all 5 broker pod IPs (2 AWS + 2 GCP +
+# 1 Azure), and Cilium ClusterMesh routes pod-to-pod across clouds, so
+# Console gets a full cross-cluster view from a single deployment.
+#
+# Listener ports match the StretchCluster manifest: Kafka 9092 / Admin 9644
+# / Schema Registry 8081, all PLAINTEXT (broker TLS is off — see the
+# stretchcluster.yaml comment block for why; cross-cloud encryption is
+# already provided by the IPsec VPN tier).
+config:
+  kafka:
+    # Port 9093, NOT 9092: the operator keeps the TLS-conventional port
+    # number even with `tls.enabled: false`. Confirmed via the redpanda
+    # headless Service — `kafka` port=9093/targetPort=9093.
+    brokers:
+      - redpanda.redpanda.svc.cluster.local:9093
+    tls:
+      enabled: false
+    sasl:
+      enabled: false
+  redpanda:
+    adminApi:
+      enabled: true
+      urls:
+        - http://redpanda.redpanda.svc.cluster.local:9644
+      tls:
+        enabled: false
+  schemaRegistry:
+    enabled: true
+    urls:
+      - http://redpanda.redpanda.svc.cluster.local:8081
+    tls:
+      enabled: false
+
+service:
+  type: LoadBalancer
+  port: 8080
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# Console OSS has no built-in auth. The presenter URL is unauthenticated by
+# design here — fine for a demo over a short-lived NLB. For anything beyond
+# a demo, layer SSO via `config.login` (Enterprise) or front Console with
+# an ingress + basic-auth.

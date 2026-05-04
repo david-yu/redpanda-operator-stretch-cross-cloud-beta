@@ -29,6 +29,16 @@ module "eks" {
   # We also skip `kube-proxy` because Cilium replaces it with eBPF
   # (kubeProxyReplacement=true). `coredns` is fine — it just sits Pending
   # on a NotReady node until Cilium provides networking, then becomes Ready.
+  #
+  # `aws-ebs-csi-driver` IS required: EKS 1.34 removed the in-tree
+  # `kubernetes.io/aws-ebs` provisioner, so without the CSI driver, the
+  # operator's `gp2`/`gp3` PVC requests for broker `datadir-*` volumes
+  # never bind and broker pods sit in `Pending` with
+  # `pod has unbound immediate PersistentVolumeClaims`. The driver also
+  # needs `AmazonEBSCSIDriverPolicy` attached to the node IAM role
+  # (see `iam_role_additional_policies` on the node group below) so its
+  # controller can call EC2 EBS APIs from a node-bound IRSA path.
+  # Documented as gotcha #11 from the 2026-05-01 validation pass.
   cluster_addons = {
     coredns = {
       most_recent = true
@@ -42,6 +52,10 @@ module "eks" {
           effect   = "NoSchedule"
         }]
       })
+    }
+    aws-ebs-csi-driver = {
+      most_recent              = true
+      resolve_conflicts_on_update = "OVERWRITE"
     }
   }
 
@@ -71,6 +85,14 @@ module "eks" {
       # Until Cilium is installed, kubelet reports NotReady. Tolerate that
       # so the node group's lifecycle hooks don't fail.
       taints = []
+
+      # Required by the `aws-ebs-csi-driver` cluster addon above. Without
+      # this policy, the CSI driver pods can't call ec2:CreateVolume /
+      # AttachVolume from the node and PVC binding silently fails for
+      # broker StatefulSets.
+      iam_role_additional_policies = {
+        AmazonEBSCSIDriverPolicy = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+      }
     }
   }
 

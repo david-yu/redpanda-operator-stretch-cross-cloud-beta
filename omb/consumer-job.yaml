@@ -40,7 +40,7 @@ spec:
                 --group omb-consumer \
                 --timeout 600000 \
                 --consumer.config /etc/kafka/consumer.properties \
-                --bootstrap-server redpanda.redpanda.svc.cluster.local:9092
+                --bootstrap-server redpanda.redpanda.svc.cluster.local:9093
           resources:
             requests:
               cpu: "1"

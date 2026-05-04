@@ -32,7 +32,7 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 - [Caveats / known issues](#caveats--known-issues)
 
 > [!IMPORTANT]
-> **Current validation state (2026-05-01)** — full end-to-end validated, including cross-cloud produce / consume.
+> **Current validation state (2026-05-03)** — full end-to-end validated, including Demo A leader-pinning fallthrough across a cordon-and-restore cycle. Supersedes the 2026-05-01 baseline.
 >
 > | Layer | State |
 > |---|---|
@@ -46,7 +46,12 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 > | StretchCluster + NodePool CRs applied, broker pods Running | ✅ |
 > | All 5 brokers in cluster, controller leader on rp-aws | ✅ `rpk cluster health` reports `Healthy: true`, 5 nodes, 0 leaderless partitions |
 > | Cross-cloud produce / consume (`cross-cloud-test` topic, partitions=5, replicas=5) | ✅ produce on AWS → consume on GCP, produce on Azure → consume on AWS |
-> | Demo add-ons (Console + ~30 MB/s OMB + kube-prometheus-stack) — see [Step 9](#9-demo-add-ons-console-omb-load-prometheus--grafana) | 🟡 Automation landed 2026-05-03; not yet end-to-end validated |
+> | Demo add-ons (Console + ~30 MB/s OMB + kube-prometheus-stack) — see [Step 9](#9-demo-add-ons-console-omb-load-prometheus--grafana) | ✅ Validated 2026-05-03 — Console (helm chart, see K8S-846 for why not the CR), Grafana w/ auto-provisioned Redpanda-Default-Dashboard, OMB sustaining 30.01 MB/s |
+> | Demo A — leader pinning + cross-cloud fallthrough (cordon → relocate → restore) | ✅ Validated 2026-05-03 — leaders pin to AWS, fall through to GCP under outage, return to AWS on restore. Convergence ~5–7 min under 30 MB/s sustained load (longer than the README's earlier "~2 min" claim). Within-rack split lands at 4/8 not 6/6 — not investigated, doesn't break the rack-priority semantics |
+> | EKS aws-ebs-csi-driver addon + AmazonEBSCSIDriverPolicy | ✅ Now in `aws/terraform/eks.tf`. Without it, broker PVCs sit Pending forever — gotcha #11 from the 2026-05-01 pass, codified into the TF on 2026-05-03 |
+> | Default StorageClass on EKS (CSI-backed) | ⚠️ Manual today: `kubectl apply` an `ebs-sc` SC marked default after the addon installs. Not yet wired into `aws/terraform/`; tracked as TODO |
+> | Broker data PVC sizing for OMB workload | ✅ Pinned to 200Gi via `spec.storage.persistentVolume.size` in each `<cloud>/manifests/stretchcluster.yaml`. Chart default of 20Gi fills in ~11 min under 30 MB/s × RF=5 — caught when all 5 brokers crashlooped on `no space left on device` mid-Demo-A |
+> | `log_retention_ms = 3600000` (1h) | ✅ Set in each `<cloud>/manifests/stretchcluster.yaml` cluster config. Required to keep disk pressure bounded under sustained OMB load even with 200Gi PVCs |
 >
 > **TLS at the broker layer is intentionally `enabled: false`** — filed upstream as [redpanda-data/redpanda-operator#1499](https://github.com/redpanda-data/redpanda-operator/issues/1499). Short version: the operator's auto-generated cert SANs (`*.redpanda`, `*.redpanda.svc`) violate RFC-6125 for single-label parents and OpenSSL fails hostname verification on the advertised broker hostname (`redpanda-rp-gcp-0.redpanda` etc.); brokers complete the TLS handshake then drop the RPC with `rpc::errc:4` / "Broken pipe". The cross-cloud hop is already IPsec-encrypted by the VPN tunnels (see [Architecture → How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted)), so `tls.enabled: false` is encryption-equivalent for that hop. Re-enabling broker TLS cleanly across clusters needs the operator change proposed in #1499 (emit explicit per-broker SANs, or skip hostname verification on cross-cluster RPC clients).
 >
@@ -278,6 +283,8 @@ This runs:
 
 Connectivity is established when `cilium clustermesh status` shows `2 / 2 remote clusters connected` on every cluster. Pod-to-pod traffic across clouds flows through Cilium's Geneve tunnel encapsulated to peer node InternalIPs (which are routable thanks to step 2's VPN mesh).
 
+> **Allow ~60s after `connect-mesh.sh` finishes before checking status.** The script's final `cilium clustermesh status` call (without `--wait`) prints the snapshot at script-end, but config propagation to cilium-agents and the KVStoreMesh sync are async — it's normal to see `1/3 configured, 0/3 connected` immediately after the script returns and `3/3 configured, 3/3 connected` 30-60s later. If it doesn't converge after 2-3 min, restart the cilium-agent DaemonSets (`kubectl -n kube-system rollout restart daemonset/cilium`) on the lagging cluster.
+
 To verify pod-IP routing across clouds:
 
 ```bash
@@ -442,6 +449,10 @@ The OMB target rate is 30 MB/s with 4 KiB records — see [`omb/README.md`](omb/
 
 > **No credentials in the repo.** `.gitignore` covers `*.local.yaml`, `console-creds.txt`, and `grafana-creds.txt` so any pinned override files stay out of git. The install scripts never write credentials to disk — they print to stderr once and leave the auto-generated values in their respective in-cluster Secrets (`monitoring-grafana`).
 
+> **Console deploys via the helm chart, NOT the operator-managed Console CR** documented at [docs.redpanda.com/current/deploy/console/kubernetes/deploy/](https://docs.redpanda.com/current/deploy/console/kubernetes/deploy/). The multicluster-mode operator we deploy (`redpanda-data/operator --version 26.2.1-beta.1`, started with `multicluster` as its first arg) only ships the StretchCluster reconciler — its Console CRD is registered but no controller in this binary watches Console CRs. Applying one leaves it with empty `status` indefinitely. Tracked as **K8S-846**. `console/values.yaml` and `scripts/install-console.sh` document why we deviate from the docs page.
+
+> **Storage sizing is real.** Chart default PVC size is 20Gi. Under the OMB workload (~30 MB/s × RF=5 = ~30 MB/s ingest per broker) that fills in ~11 minutes, the partition autobalancer stalls with `Over Disk Limit Nodes`, and brokers crashloop on `no space left on device`. The committed manifests pin `spec.storage.persistentVolume.size: 200Gi` plus `log_retention_ms: 3600000` (1 hour). These two together give a multi-hour Demo A window without disk pressure feedback.
+
 ## Demo A: leader pinning + cross-cloud failover fallthrough
 
 > Adapted from the same-cloud beta's [Demo A: leader pinning + region-failure fallthrough](https://github.com/david-yu/redpanda-operator-stretch-beta#demo-a-leader-pinning--region-failure-fallthrough). Same shape — cordon the primary, watch leadership relocate, restore — but the rack labels are *cloud names* (`aws` / `gcp` / `azure`) and the failure boundary is an entire cloud's K8s cluster.
@@ -544,7 +555,7 @@ kubectl --context rp-aws -n redpanda delete pod \
 
 **Step 4 — confirm leaders fall through to the GCP rack**
 
-Wait ~2 min for the controller to mark AWS brokers unreachable (well under the `partition_autobalancing_node_availability_timeout_sec: 600` we set, so they don't get auto-decommissioned mid-demo) and for the leader balancer to relocate leaders. Run the tally from a *surviving* cluster (rp-aws's API is gone):
+Wait **~5–7 min** for the controller to mark AWS brokers unreachable (well under the `partition_autobalancing_node_availability_timeout_sec: 600` we set, so they don't get auto-decommissioned mid-demo) and for the leader balancer to relocate leaders. Under the 30 MB/s OMB load, convergence is meaningfully slower than the same-cloud beta's ~2 min — every replica catch-up has to traverse the cross-cloud VPN. Run the tally from a *surviving* cluster (rp-aws's API is gone):
 
 ```bash
 sleep 120
@@ -602,6 +613,9 @@ Console / Grafana show the leader-count panel flip back to `aws=12, gcp=0, azure
 - **Leader balancer stalls during under-replicated periods.** When a whole cloud's brokers go away, the balancer pauses while the cluster is recovering, then resumes once partitions are re-replicated. Expect 30–90 s of "leaders not yet redistributed" while replicas are being rebuilt elsewhere.
 - **EKS NLBs may be reaped during long cordons.** If you keep AWS cordoned for more than ~10–15 min, the AWS Load Balancer Controller (whose pods are also Pending on cordoned nodes) stops reconciling, and any LB it owns can be reaped by the cloud LB controller. The `rp-aws-multicluster-peer` LB is the one that matters — if it's gone, the rp-gcp / rp-azure operator pods drop their AWS-peer connection until you uncordon and the LB is recreated. For Demo A's short cycle this doesn't bite; it does for Demo B (which deliberately leaves AWS down).
 - **`rpk redpanda admin brokers list` may briefly show un-affected brokers as `IS-ALIVE=false`.** During transitions, cross-cloud heartbeats can flap. Confirm against `rpk cluster health` (`Nodes down:` field), which uses the controller's authoritative view — except when the controller itself sits across a > 100 ms RTT line (see the Azure caveat above).
+- **Within-rack leader split lands at 4/8 not 6/6 after AWS recovery.** The `ordered_racks` rack-priority semantics work (12 leaders return to AWS), but the leader balancer doesn't always even out across the two AWS-rack brokers. `rpk cluster partitions transfer-leadership <topic> --partition <pid>:<broker>` works to nudge specific partitions, but the balancer may move them back. Not a blocker — the rack-pin objective is met. Filing a follow-up issue makes sense if intra-rack evenness becomes a hard requirement.
+- **GKE kubectl-exec sessions get reset by the API server LB on commands lasting >60 s.** During Demo A I hit `connection reset by peer` on long `rpk` queries against rp-gcp brokers. Workaround: anchor long-running queries on rp-aws or rp-azure (the EKS / AKS API servers don't have the same idle-LB behavior).
+- **Don't run OMB at 30 MB/s for hours without 200Gi PVCs + 1h retention.** All five brokers will hit `no space left on device` and crashloop simultaneously. Recovery requires online PVC expansion (`kubectl patch pvc datadir-... -p '{"spec":{"resources":{"requests":{"storage":"200Gi"}}}}'`) on every broker + force-delete the crashlooping pods to trigger the FS resize on remount. `<cloud>/manifests/stretchcluster.yaml` is now sized for this; only an issue if you bring up the cluster from a pre-2026-05-03 snapshot.
 
 ## Cost
 

@@ -33,10 +33,12 @@ NAMESPACE=${NAMESPACE:-monitoring}
 RELEASE=${RELEASE:-monitoring}
 KPS_VERSION=${KPS_VERSION:-}
 
-# Public Redpanda Grafana dashboard — operator/k8s edition. Pinned so the
-# install is reproducible. If the URL 404s in the future, update this; the
-# canonical source is https://github.com/redpanda-data/observability.
-DASHBOARD_URL=${DASHBOARD_URL:-https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/Kubernetes-Redpanda.json}
+# Public Redpanda Grafana dashboard. Pinned so the install is
+# reproducible. If the URL 404s in the future, list what's available with:
+#   curl -s https://api.github.com/repos/redpanda-data/observability/contents/grafana-dashboards
+# Drift caught 2026-05-03 — the previous filename `Kubernetes-Redpanda.json`
+# 404s; the actual file in that repo is `Redpanda-Default-Dashboard.json`.
+DASHBOARD_URL=${DASHBOARD_URL:-https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/Redpanda-Default-Dashboard.json}
 
 log() { echo "[install-monitoring] $*" >&2; }
 
