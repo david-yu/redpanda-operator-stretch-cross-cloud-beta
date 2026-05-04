@@ -635,7 +635,10 @@ Rough estimate (`us-east-1` / `us-east1` / `eastus`):
 | Cross-cloud LBs (3× NLB / Standard LB) | ~$0.07 |
 | Cilium clustermesh-apiserver LB (3 of) | ~$0.05 |
 | Console + Grafana NLBs on rp-aws (step 9, only when running the demo addons) | ~$0.04 |
-| **Compute + VPN + LB subtotal** | **~$2.09/hr** |
+| Broker data PVCs (5× 200Gi: 2 EBS gp3 on AWS, 2 pd-balanced on GCP, 1 Azure Managed Disk Standard) | ~$0.12 |
+| **Compute + VPN + LB + storage subtotal** | **~$2.21/hr** |
+
+The broker PVC line item is the 2026-05-03 sizing change (`spec.storage.persistentVolume.size: 200Gi` per cloud). At the chart's old default 20Gi the disk subtotal was ~$0.01/hr (negligible) but the cluster crashed every ~11 minutes under the OMB 30 MB/s × RF=5 demo workload. 200Gi gives a multi-hour Demo A window for ~$0.11/hr more.
 
 On top: **inter-cloud egress** at the ~$0.05–$0.15/GB tier on every provider. Even idle, broker-to-broker raft heartbeats + Cilium clustermesh-apiserver sync + BGP keepalives add up. Plan for **$5–$30/day in egress** alone for a quiet test cluster, much more under load.
 
