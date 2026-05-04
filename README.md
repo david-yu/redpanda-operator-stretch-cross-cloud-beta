@@ -5,7 +5,7 @@ Validation scaffold for a Redpanda Operator v26.2.1+ StretchCluster that **spans
 Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (single-cloud, three-region). Where the same-cloud beta uses the cloud's native L3 mesh (AWS TGW, GCP global VPC, Azure VNet peering), this repo uses **a 3-way mesh of site-to-site IPsec VPNs (BGP-routed) + Cilium ClusterMesh on top**, so node InternalIPs are routable across cloud boundaries and Cilium's clustermesh data plane works without modification.
 
 > [!TIP]
-> **If you don't specifically need cross-cloud, prefer [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (cross-region in a single cloud).** Cross-cloud egress is billed at each provider's *internet-egress* rate ($0.087–$0.12/GB), while same-cloud cross-region egress is ~$0.02/GB — a **4–6× egress saving** at idle and even more under load. For the 30 MB/s OMB demo workload, that's roughly **~$29/hr** of egress in this cross-cloud scaffold versus **~$5–$7/hr** in the same-cloud beta. Use this repo only when the demo *itself* is cross-cloud (e.g., a 3-cloud failover story); use the same-cloud beta for everything else, including most leader-pinning / autobalancer / multicluster-operator validation. See the [Cost](#cost) section for the breakdown.
+> **If you don't specifically need cross-cloud, prefer [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (cross-region in a single cloud).** Cross-cloud egress is billed at each provider's *internet-egress* rate ($0.087–$0.12/GB), while same-cloud cross-region egress is \~$0.02/GB — a **4–6× egress saving** at idle and even more under load. For the 30 MB/s OMB demo workload, that's roughly **\~$29/hr** of egress in this cross-cloud scaffold versus **\~$5–$7/hr** in the same-cloud beta. Use this repo only when the demo *itself* is cross-cloud (e.g., a 3-cloud failover story); use the same-cloud beta for everything else, including most leader-pinning / autobalancer / multicluster-operator validation. See the [Cost](#cost) section for the breakdown.
 
 ## Contents
 
@@ -138,7 +138,7 @@ Within a single cluster the broker traffic stays inside that cloud's VPC/VNet �
 ├── console/
 │   └── console.yaml            # Console CR (cluster.redpanda.com/v1alpha2) — operator-managed via clusterRef
 ├── omb/
-│   ├── producer-job.yaml       # ~30 MB/s kafka-perf-test producer (Job in the redpanda namespace)
+│   ├── producer-job.yaml       # \~30 MB/s kafka-perf-test producer (Job in the redpanda namespace)
 │   ├── consumer-job.yaml       # matching consumer
 │   └── README.md
 ├── monitoring/
@@ -150,7 +150,7 @@ Within a single cluster the broker traffic stays inside that cloud's VPC/VNet �
     ├── apply-vpn.sh            # collects per-cloud TF outputs and applies vpn/terraform
     ├── bootstrap-redpanda.sh   # cert-manager + license secret + node annotations
     ├── install-console.sh      # Console on rp-aws (LB + URL printed at end)
-    ├── install-omb.sh          # creates load-test topic + applies OMB Jobs (~30 MB/s)
+    ├── install-omb.sh          # creates load-test topic + applies OMB Jobs (\~30 MB/s)
     ├── install-monitoring.sh   # kube-prometheus-stack + Redpanda dashboard, prints Grafana URL+creds
     └── teardown.sh             # full multi-cloud teardown (uninstalls demo addons first)
 ```
@@ -167,7 +167,7 @@ Within a single cluster the broker traffic stays inside that cloud's VPC/VNet �
 
 The flow is:
 
-1. **Apply per-cloud Terraform** (clusters + VPN gateways). VPN gateway creation alone is slow on Azure (~30-45 min for `azurerm_virtual_network_gateway`), so kick off all three in parallel.
+1. **Apply per-cloud Terraform** (clusters + VPN gateways). VPN gateway creation alone is slow on Azure (\~30-45 min for `azurerm_virtual_network_gateway`), so kick off all three in parallel.
 2. **Apply `vpn/terraform/`** — wires the 3-way mesh of IPsec tunnels with BGP. Reads each cloud's outputs.
 3. **Verify VPN connectivity** — node-internal-IP pings cross-cloud should succeed.
 4. **Install Cilium** on each cluster.
@@ -186,19 +186,19 @@ Each cloud's Terraform brings up a Kubernetes cluster plus the cloud's VPN gatew
 So `kubectl get nodes` after step 1 shows: rp-aws / rp-gcp = Ready, rp-azure = NotReady. All become Ready after step 4.
 
 ```bash
-# AWS — ~12-15 min for EKS + VGW
+# AWS — \~12-15 min for EKS + VGW
 cd aws/terraform
 terraform init
 terraform apply
 # (record the kubectl_setup_command output and run it)
 
-# GCP — ~10-15 min for GKE + HA VPN
+# GCP — \~10-15 min for GKE + HA VPN
 cd ../../gcp/terraform
 terraform init
 terraform apply -var project_id=<your-gcp-project>
 # (record + run kubectl_setup_command)
 
-# Azure — ~5 min for AKS, then ~30-45 min for VPN GW (azurerm_virtual_network_gateway is just slow)
+# Azure — \~5 min for AKS, then \~30-45 min for VPN GW (azurerm_virtual_network_gateway is just slow)
 cd ../../azure/terraform
 terraform init
 terraform apply
@@ -235,7 +235,7 @@ kubectl --context rp-aws run -i --rm test --image=alpine:3.20 --restart=Never --
   sh -c "apk add -q iputils 2>/dev/null; ping -c 3 -W 5 $gcp_node_internal_ip"
 ```
 
-If this succeeds, the VPN tier is healthy. If it times out, BGP routes haven't propagated yet (normal for the first ~30s after `apply-vpn.sh`) or there's an IPsec tunnel issue (`aws ec2 describe-vpn-connections` and `gcloud compute vpn-tunnels list`).
+If this succeeds, the VPN tier is healthy. If it times out, BGP routes haven't propagated yet (normal for the first \~30s after `apply-vpn.sh`) or there's an IPsec tunnel issue (`aws ec2 describe-vpn-connections` and `gcloud compute vpn-tunnels list`).
 
 ### 4. Install Cilium on each cluster
 
@@ -267,7 +267,7 @@ This runs:
 
 Connectivity is established when `cilium clustermesh status` shows `2 / 2 remote clusters connected` on every cluster. Pod-to-pod traffic across clouds flows through Cilium's Geneve tunnel encapsulated to peer node InternalIPs (which are routable thanks to step 2's VPN mesh).
 
-> **Allow ~60s after `connect-mesh.sh` finishes before checking status.** The script's final `cilium clustermesh status` call (without `--wait`) prints the snapshot at script-end, but config propagation to cilium-agents and the KVStoreMesh sync are async — it's normal to see `1/3 configured, 0/3 connected` immediately after the script returns and `3/3 configured, 3/3 connected` 30-60s later. If it doesn't converge after 2-3 min, restart the cilium-agent DaemonSets (`kubectl -n kube-system rollout restart daemonset/cilium`) on the lagging cluster.
+> **Allow \~60s after `connect-mesh.sh` finishes before checking status.** The script's final `cilium clustermesh status` call (without `--wait`) prints the snapshot at script-end, but config propagation to cilium-agents and the KVStoreMesh sync are async — it's normal to see `1/3 configured, 0/3 connected` immediately after the script returns and `3/3 configured, 3/3 connected` 30-60s later. If it doesn't converge after 2-3 min, restart the cilium-agent DaemonSets (`kubectl -n kube-system rollout restart daemonset/cilium`) on the lagging cluster.
 
 To verify pod-IP routing across clouds:
 
@@ -393,7 +393,7 @@ kubectl --context rp-gcp -n redpanda exec -it redpanda-rp-gcp-0 -c redpanda -- \
 
 ### 9. Demo add-ons: Console, OMB load, Prometheus + Grafana
 
-These three add-ons turn the bare cross-cloud StretchCluster into a presentable demo: a single Redpanda Console UI for the topic / partition / consumer-group view, a ~30 MB/s OMB-equivalent workload so failover behavior is visible under real load, and a Prometheus + Grafana stack scraping all 5 brokers across 3 clouds with the published Redpanda dashboard pre-imported.
+These three add-ons turn the bare cross-cloud StretchCluster into a presentable demo: a single Redpanda Console UI for the topic / partition / consumer-group view, a \~30 MB/s OMB-equivalent workload so failover behavior is visible under real load, and a Prometheus + Grafana stack scraping all 5 brokers across 3 clouds with the published Redpanda dashboard pre-imported.
 
 All three install on **rp-aws only** — the controller is pinned there (`default_leaders_preference: "racks:aws"`), and the operator's flat-mode EndpointSlices put every peer broker pod IP into rp-aws's headless `redpanda` Service, so a single Console / Prometheus reaches the whole stretch cluster without per-cluster federation.
 
@@ -402,7 +402,7 @@ All three install on **rp-aws only** — the controller is pinned there (`defaul
 ```bash
 ./scripts/install-console.sh        # Redpanda Console on rp-aws
 ./scripts/install-monitoring.sh     # kube-prometheus-stack on rp-aws
-./scripts/install-omb.sh            # ~30 MB/s producer + consumer Jobs
+./scripts/install-omb.sh            # \~30 MB/s producer + consumer Jobs
 ```
 
 Each script provisions its own LoadBalancer (NLB on AWS), waits for it to come up, and prints the URL + login at the end. **Nothing about credentials is committed to the repo** — Grafana's admin password is auto-generated by the chart and read out of the in-cluster `monitoring-grafana` Secret only at print time. If you want to re-print them later:
@@ -426,7 +426,7 @@ What each piece is doing under the hood:
 | Add-on | Chart / image | Where load lands | Demo signal |
 |---|---|---|---|
 | **Console** | Operator-managed `Console` CR (`cluster.redpanda.com/v1alpha2`) in namespace `redpanda`, exposed via `Service: type=LoadBalancer` (NLB). The operator pulls broker / Admin API / Schema Registry endpoints + TLS + auth from the StretchCluster via `spec.cluster.clusterRef` — no per-listener wiring in the CR | n/a — read-only UI | Topics → `load-test` shows partition leadership across racks (`aws` / `gcp` / `azure`); consumer group `omb-consumer` shows lag spike + recover during failover |
-| **OMB workload** | `apache/kafka:3.8.0` Job, `kafka-producer-perf-test --throughput 7680 --record-size 4096` | `redpanda` namespace on rp-aws — leaders for the 24 partitions distribute across racks per the operator's leader-balancer | `kubectl logs -f job/omb-producer` shows per-5s `records sent / records/sec / avg latency / max latency`. A regional cordon → ~5–30 s producer stall → return to ~7680 records/sec |
+| **OMB workload** | `apache/kafka:3.8.0` Job, `kafka-producer-perf-test --throughput 7680 --record-size 4096` | `redpanda` namespace on rp-aws — leaders for the 24 partitions distribute across racks per the operator's leader-balancer | `kubectl logs -f job/omb-producer` shows per-5s `records sent / records/sec / avg latency / max latency`. A regional cordon → \~5–30 s producer stall → return to \~7680 records/sec |
 | **Prometheus + Grafana** | `prometheus-community/kube-prometheus-stack`, namespace `monitoring`, Grafana exposed via NLB | scrapes `redpanda.redpanda.svc.cluster.local:9644/public_metrics` (Endpoints SD), reaches all 5 brokers thanks to flat-mode EndpointSlices + Cilium ClusterMesh | Dashboards → Redpanda → "Kubernetes Redpanda" — produce/consume MB/s, p50/p95/p99 latency, leader count by rack, URP / leader-elections panels light up during region failover |
 
 The OMB target rate is 30 MB/s with 4 KiB records — see [`omb/README.md`](omb/README.md) for the rate-tuning matrix if you want a different number, and the same notes on stopping / re-applying the Jobs.
@@ -435,7 +435,7 @@ The OMB target rate is 30 MB/s with 4 KiB records — see [`omb/README.md`](omb/
 
 > **Console deploys via the helm chart, NOT the operator-managed Console CR** documented at [docs.redpanda.com/current/deploy/console/kubernetes/deploy/](https://docs.redpanda.com/current/deploy/console/kubernetes/deploy/). The multicluster-mode operator we deploy (`redpanda-data/operator --version 26.2.1-beta.1`, started with `multicluster` as its first arg) only ships the StretchCluster reconciler — its Console CRD is registered but no controller in this binary watches Console CRs. Applying one leaves it with empty `status` indefinitely. Tracked as **K8S-846**. `console/values.yaml` and `scripts/install-console.sh` document why we deviate from the docs page.
 
-> **Storage sizing is real.** Chart default PVC size is 20Gi. Under the OMB workload (~30 MB/s × RF=5 = ~30 MB/s ingest per broker) that fills in ~11 minutes, the partition autobalancer stalls with `Over Disk Limit Nodes`, and brokers crashloop on `no space left on device`. The committed manifests pin `spec.storage.persistentVolume.size: 200Gi` plus `log_retention_ms: 3600000` (1 hour). These two together give a multi-hour Demo A window without disk pressure feedback.
+> **Storage sizing is real.** Chart default PVC size is 20Gi. Under the OMB workload (\~30 MB/s × RF=5 = \~30 MB/s ingest per broker) that fills in \~11 minutes, the partition autobalancer stalls with `Over Disk Limit Nodes`, and brokers crashloop on `no space left on device`. The committed manifests pin `spec.storage.persistentVolume.size: 200Gi` plus `log_retention_ms: 3600000` (1 hour). These two together give a multi-hour Demo A window without disk pressure feedback.
 
 ## Demo A: leader pinning + cross-cloud failover fallthrough
 
@@ -457,7 +457,7 @@ config:
 
 `bootstrap-redpanda.sh` annotates every node with `redpanda.com/cloud=<aws|gcp|azure>` (from step 6), so each broker's rack is the cloud it lives in (one rack per cloud). With the 2 / 2 / 1 broker layout (RF=5), a single-cloud outage leaves quorum with 3 brokers and leadership relocates to the next reachable rack in the priority list.
 
-> **Run continuous load (recommended).** Apply the [`omb/`](omb/) Jobs *before* starting Demo A so the producer + consumer are at steady state when you cordon the primary cloud. The producer's per-5s throughput line stalls for ~5–30 s during leader re-election then returns to ~7680 records/sec — that's the visible proof the cluster kept serving traffic across a full-cloud failure. The same window shows in Grafana as a leader-count flip from `rack=aws` to `rack=gcp` and a brief consumer-lag spike.
+> **Run continuous load (recommended).** Apply the [`omb/`](omb/) Jobs *before* starting Demo A so the producer + consumer are at steady state when you cordon the primary cloud. The producer's per-5s throughput line stalls for \~5–30 s during leader re-election then returns to \~7680 records/sec — that's the visible proof the cluster kept serving traffic across a full-cloud failure. The same window shows in Grafana as a leader-count flip from `rack=aws` to `rack=gcp` and a brief consumer-lag spike.
 >
 > ```bash
 > ./scripts/install-omb.sh    # creates load-test, starts producer + consumer
@@ -506,7 +506,7 @@ kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
   rpk topic create leader-pinning-demo --partitions 12 --replicas 5
 ```
 
-Wait ~60 s for the leader balancer to converge, then tally leaders by broker:
+Wait \~60 s for the leader balancer to converge, then tally leaders by broker:
 
 ```bash
 sleep 60
@@ -525,7 +525,7 @@ If you have Console up (`./scripts/install-console.sh`), Topics → `leader-pinn
 
 **Step 3 — simulate the AWS cloud failing**
 
-Patching the `NodePool` to `replicas: 0` triggers a *graceful* decommission, which stalls under RF=5 (autobalancer has nowhere to land replicas). Likewise `kubectl scale sts redpanda-rp-aws --replicas=0` is fought back by the operator's reconcile loop within ~60 s.
+Patching the `NodePool` to `replicas: 0` triggers a *graceful* decommission, which stalls under RF=5 (autobalancer has nowhere to land replicas). Likewise `kubectl scale sts redpanda-rp-aws --replicas=0` is fought back by the operator's reconcile loop within \~60 s.
 
 For a true cloud-outage simulation (brokers unreachable, no graceful drain), cordon every node in rp-aws and delete the broker pods so they sit `Pending`:
 
@@ -539,7 +539,7 @@ kubectl --context rp-aws -n redpanda delete pod \
 
 **Step 4 — confirm leaders fall through to the GCP rack**
 
-Wait **~5–7 min** for the controller to mark AWS brokers unreachable (well under the `partition_autobalancing_node_availability_timeout_sec: 600` we set, so they don't get auto-decommissioned mid-demo) and for the leader balancer to relocate leaders. Under the 30 MB/s OMB load, convergence is meaningfully slower than the same-cloud beta's ~2 min — every replica catch-up has to traverse the cross-cloud VPN. Run the tally from a *surviving* cluster (rp-aws's API is gone):
+Wait **\~5–7 min** for the controller to mark AWS brokers unreachable (well under the `partition_autobalancing_node_availability_timeout_sec: 600` we set, so they don't get auto-decommissioned mid-demo) and for the leader balancer to relocate leaders. Under the 30 MB/s OMB load, convergence is meaningfully slower than the same-cloud beta's \~2 min — every replica catch-up has to traverse the cross-cloud VPN. Run the tally from a *surviving* cluster (rp-aws's API is gone):
 
 ```bash
 sleep 120
@@ -563,10 +563,10 @@ If you see something like `4 2 / 4 3 / 4 4` mid-window, that's the leader balanc
 | Surface | What to point at | What to expect |
 |---|---|---|
 | **Console** → Topics → `leader-pinning-demo` → Partitions | The leader column for every partition | Flips from broker IDs in rack=aws (step 2) to rack=gcp (step 4), then back to rack=aws (step 5) |
-| **Console** → Topics → `load-test` → Consumer Groups → `omb-consumer` | Lag column | ~0 in steady state; spikes during the cordon window; drains back to ~0 once leaders relocate |
-| **Grafana** → Redpanda → "Kubernetes Redpanda" → throughput panels | Per-rack produce / consume MB/s | Sustained ~30 MB/s with a brief dip during leader re-election |
+| **Console** → Topics → `load-test` → Consumer Groups → `omb-consumer` | Lag column | \~0 in steady state; spikes during the cordon window; drains back to \~0 once leaders relocate |
+| **Grafana** → Redpanda → "Kubernetes Redpanda" → throughput panels | Per-rack produce / consume MB/s | Sustained \~30 MB/s with a brief dip during leader re-election |
 | **Grafana** → same dashboard → leader-count panels | Leader count by rack | Steps from `aws=12, gcp=0, azure=0` to `aws=0, gcp=12, azure=0` and back |
-| **`kubectl logs -f job/omb-producer`** | Per-5s `records sent / records/sec / avg latency / max latency` | Throughput pauses for ~5–30 s during leader migration, then returns to ~7680 records/sec |
+| **`kubectl logs -f job/omb-producer`** | Per-5s `records sent / records/sec / avg latency / max latency` | Throughput pauses for \~5–30 s during leader migration, then returns to \~7680 records/sec |
 
 **Step 5 — restore AWS and watch leaders return**
 
@@ -578,7 +578,7 @@ for N in $(kubectl --context rp-aws get nodes -o name); do
 done
 ```
 
-Brokers rejoin (~60 s), partitions catch up, the leader balancer moves leaders back to AWS (rank 1 in `ordered_racks`). After ~2 min:
+Brokers rejoin (\~60 s), partitions catch up, the leader balancer moves leaders back to AWS (rank 1 in `ordered_racks`). After \~2 min:
 
 ```bash
 kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
@@ -595,7 +595,7 @@ Console / Grafana show the leader-count panel flip back to `aws=12, gcp=0, azure
 **Caveats observed in this scaffold:**
 
 - **Leader balancer stalls during under-replicated periods.** When a whole cloud's brokers go away, the balancer pauses while the cluster is recovering, then resumes once partitions are re-replicated. Expect 30–90 s of "leaders not yet redistributed" while replicas are being rebuilt elsewhere.
-- **EKS NLBs may be reaped during long cordons.** If you keep AWS cordoned for more than ~10–15 min, the AWS Load Balancer Controller (whose pods are also Pending on cordoned nodes) stops reconciling, and any LB it owns can be reaped by the cloud LB controller. The `rp-aws-multicluster-peer` LB is the one that matters — if it's gone, the rp-gcp / rp-azure operator pods drop their AWS-peer connection until you uncordon and the LB is recreated. For Demo A's short cycle this doesn't bite; it does for Demo B (which deliberately leaves AWS down).
+- **EKS NLBs may be reaped during long cordons.** If you keep AWS cordoned for more than \~10–15 min, the AWS Load Balancer Controller (whose pods are also Pending on cordoned nodes) stops reconciling, and any LB it owns can be reaped by the cloud LB controller. The `rp-aws-multicluster-peer` LB is the one that matters — if it's gone, the rp-gcp / rp-azure operator pods drop their AWS-peer connection until you uncordon and the LB is recreated. For Demo A's short cycle this doesn't bite; it does for Demo B (which deliberately leaves AWS down).
 - **`rpk redpanda admin brokers list` may briefly show un-affected brokers as `IS-ALIVE=false`.** During transitions, cross-cloud heartbeats can flap. Confirm against `rpk cluster health` (`Nodes down:` field), which uses the controller's authoritative view — except when the controller itself sits across a > 100 ms RTT line (see the Azure caveat above).
 - **Within-rack leader split lands at 4/8 not 6/6 after AWS recovery.** The `ordered_racks` rack-priority semantics work (12 leaders return to AWS), but the leader balancer doesn't always even out across the two AWS-rack brokers. `rpk cluster partitions transfer-leadership <topic> --partition <pid>:<broker>` works to nudge specific partitions, but the balancer may move them back. Not a blocker — the rack-pin objective is met. Filing a follow-up issue makes sense if intra-rack evenness becomes a hard requirement.
 - **GKE kubectl-exec sessions get reset by the API server LB on commands lasting >60 s.** During Demo A I hit `connection reset by peer` on long `rpk` queries against rp-gcp brokers. Workaround: anchor long-running queries on rp-aws or rp-azure (the EKS / AKS API servers don't have the same idle-LB behavior).
@@ -612,17 +612,17 @@ Rough estimate (`us-east-1` / `us-east1` / `eastus`):
 | AWS Site-to-Site VPN (2 connections × $0.05/hr) | $0.10 |
 | GKE regional control plane | $0.10 |
 | 3× n2-standard-4 (regional cluster, `node_count=1` × 3 zones) | $0.58 |
-| GCP HA VPN gateway (2 tunnels active × $0.05/hr) | ~$0.10 |
+| GCP HA VPN gateway (2 tunnels active × $0.05/hr) | \~$0.10 |
 | AKS control plane (free tier) | $0.00 |
 | 2× Standard_D4s_v5 | $0.38 |
 | Azure VPN Gateway (VpnGw1 sku) | $0.19 |
-| Cross-cloud LBs (3× NLB / Standard LB) | ~$0.07 |
-| Cilium clustermesh-apiserver LB (3 of) | ~$0.05 |
-| Console + Grafana NLBs on rp-aws (step 9, only when running the demo addons) | ~$0.04 |
-| Broker data PVCs (5× 200Gi: 2 EBS gp3 on AWS, 2 pd-balanced on GCP, 1 Azure Managed Disk Standard) | ~$0.12 |
-| **Compute + VPN + LB + storage subtotal** | **~$2.21/hr** |
+| Cross-cloud LBs (3× NLB / Standard LB) | \~$0.07 |
+| Cilium clustermesh-apiserver LB (3 of) | \~$0.05 |
+| Console + Grafana NLBs on rp-aws (step 9, only when running the demo addons) | \~$0.04 |
+| Broker data PVCs (5× 200Gi: 2 EBS gp3 on AWS, 2 pd-balanced on GCP, 1 Azure Managed Disk Standard) | \~$0.12 |
+| **Compute + VPN + LB + storage subtotal** | **\~$2.21/hr** |
 
-The broker PVC line item is the 2026-05-03 sizing change (`spec.storage.persistentVolume.size: 200Gi` per cloud). At the chart's old default 20Gi the disk subtotal was ~$0.01/hr (negligible) but the cluster crashed every ~11 minutes under the OMB 30 MB/s × RF=5 demo workload. 200Gi gives a multi-hour Demo A window for ~$0.11/hr more.
+The broker PVC line item is the 2026-05-03 sizing change (`spec.storage.persistentVolume.size: 200Gi` per cloud). At the chart's old default 20Gi the disk subtotal was \~$0.01/hr (negligible) but the cluster crashed every \~11 minutes under the OMB 30 MB/s × RF=5 demo workload. 200Gi gives a multi-hour Demo A window for \~$0.11/hr more.
 
 ### Cross-cloud egress (the dominant cost under load)
 
@@ -642,39 +642,39 @@ The compute subtotal above is the floor. Cross-cloud network egress is the varia
 - 2 GCP followers → 30 MB/s × 2 = 60 MB/s out of AWS, 0 inbound charge on GCP
 - 1 Azure follower → 30 MB/s × 1 = 30 MB/s out of AWS
 
-So the producer side (AWS) emits **~90 MB/s = ~324 GB/hr cross-cloud** under sustained 30 MB/s OMB load. At AWS's $0.09/GB:
+So the producer side (AWS) emits **\~90 MB/s = \~324 GB/hr cross-cloud** under sustained 30 MB/s OMB load. At AWS's $0.09/GB:
 
-- **~$29.16/hr in AWS egress under 30 MB/s OMB sustained load**
+- **\~$29.16/hr in AWS egress under 30 MB/s OMB sustained load**
 
-The OMB consumer adds back-pressure on whichever cloud the consumer pod runs in (we run it on rp-aws, so most consume traffic stays AWS-local). If you move the consumer to rp-gcp or rp-azure, expect another ~$15–$30/hr of egress out of GCP / Azure for the consume path.
+The OMB consumer adds back-pressure on whichever cloud the consumer pod runs in (we run it on rp-aws, so most consume traffic stays AWS-local). If you move the consumer to rp-gcp or rp-azure, expect another \~$15–$30/hr of egress out of GCP / Azure for the consume path.
 
 **Idle cost** (no client traffic, brokers + operators + clustermesh sync + BGP keepalives):
 
-- Broker raft heartbeats: ~5–10 KB/s per peer pair × 10 cross-cloud broker pairs ≈ 100 KB/s ≈ 350 MB/hr ≈ **$0.03/hr**
-- Cilium clustermesh-apiserver KVStoreMesh sync: ~10 KB/s per peer pair × 6 pairs ≈ 60 KB/s ≈ **$0.02/hr**
+- Broker raft heartbeats: \~5–10 KB/s per peer pair × 10 cross-cloud broker pairs ≈ 100 KB/s ≈ 350 MB/hr ≈ **$0.03/hr**
+- Cilium clustermesh-apiserver KVStoreMesh sync: \~10 KB/s per peer pair × 6 pairs ≈ 60 KB/s ≈ **$0.02/hr**
 - Operator multicluster raft: similar order, **$0.01/hr**
 - BGP keepalives over VPN tunnels: trivial, **<$0.01/hr**
-- **Idle egress total: ~$0.06–$0.10/hr** (matches the README's prior "$5–$30/day idle" claim — closer to the lower end with the static-routes VPN config we now ship)
+- **Idle egress total: \~$0.06–$0.10/hr** (matches the README's prior "$5–$30/day idle" claim — closer to the lower end with the static-routes VPN config we now ship)
 
 **Summary**:
 
 | Mode | Compute + LB + storage | Cross-cloud egress | Total |
 |---|---|---|---|
-| Idle (cluster up, no client traffic) | $2.21/hr | ~$0.08/hr | **~$2.29/hr** |
-| Demo A run (30 MB/s OMB, RF=5, AWS-pinned leaders) | $2.21/hr | **~$29/hr** | **~$31/hr** |
+| Idle (cluster up, no client traffic) | $2.21/hr | \~$0.08/hr | **\~$2.29/hr** |
+| Demo A run (30 MB/s OMB, RF=5, AWS-pinned leaders) | $2.21/hr | **\~$29/hr** | **\~$31/hr** |
 
-A Demo A run that takes ~3-4 hours of bring-up + walkthrough + teardown lands at **~$30 in compute + ~$60–$120 in egress** depending on how long OMB runs. Drop OMB throughput proportionally for cheaper iterations — `--throughput 1280 --record-size 1024` (the same-cloud beta's ~10 Mbps default) cuts egress 24× to ~$1.20/hr.
+A Demo A run that takes \~3-4 hours of bring-up + walkthrough + teardown lands at **\~$30 in compute + \~$60–$120 in egress** depending on how long OMB runs. Drop OMB throughput proportionally for cheaper iterations — `--throughput 1280 --record-size 1024` (the same-cloud beta's \~10 Mbps default) cuts egress 24× to \~$1.20/hr.
 
 ### Same-cloud cross-region is dramatically cheaper
 
 If your demo / validation doesn't *specifically* require cross-cloud, use [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) instead. It runs a StretchCluster across three regions of a single cloud, which keeps egress on each provider's much-cheaper inter-region rate:
 
-| Egress path | Rate (rough) | 30 MB/s OMB cost (~324 GB/hr cross-region) |
+| Egress path | Rate (rough) | 30 MB/s OMB cost (\~324 GB/hr cross-region) |
 |---|---|---|
-| AWS inter-region (us-east-1 ↔ us-west-2) | ~$0.02/GB | ~$6.50/hr |
-| GCP inter-region (us-east1 ↔ us-west1) | ~$0.02/GB | ~$6.50/hr |
-| Azure inter-region (eastus ↔ westus2) | ~$0.02/GB | ~$6.50/hr |
-| **Cross-cloud (this repo)** | $0.087–$0.12/GB | **~$29/hr** |
+| AWS inter-region (us-east-1 ↔ us-west-2) | \~$0.02/GB | \~$6.50/hr |
+| GCP inter-region (us-east1 ↔ us-west1) | \~$0.02/GB | \~$6.50/hr |
+| Azure inter-region (eastus ↔ westus2) | \~$0.02/GB | \~$6.50/hr |
+| **Cross-cloud (this repo)** | $0.087–$0.12/GB | **\~$29/hr** |
 
 That's a **4–6× egress saving** at the same workload, plus you skip the IPsec VPN tier entirely (no `vpn/terraform/`, no static-route plumbing, simpler tear-down). Use the same-cloud beta for: leader-pinning / `ordered_racks` validation, autobalancer behavior, multicluster operator raft, broker TLS work (which the same-cloud beta can actually run with TLS on, since #1499's hostname-mismatch only bites cross-cluster), Console / OMB / Prometheus integration testing.
 
@@ -720,7 +720,7 @@ Most likely Cilium clustermesh isn't routing pod IPs cross-cluster, or the opera
 
 ### Auto-decom doesn't fire on a region failure
 
-Same finding as the same-cloud AWS run: the partition balancer's `node_status_rpc` heartbeat has a hardcoded ~100ms timeout. If the controller (`redpanda/controller/0` leader) lands in a cloud whose RTT to one of the other clouds exceeds 100ms, it perpetually marks that cloud's brokers unresponsive and won't auto-decom anything. Check current controller location with `rpk cluster health` (`controller_id` field), then force the controller to a low-RTT cloud:
+Same finding as the same-cloud AWS run: the partition balancer's `node_status_rpc` heartbeat has a hardcoded \~100ms timeout. If the controller (`redpanda/controller/0` leader) lands in a cloud whose RTT to one of the other clouds exceeds 100ms, it perpetually marks that cloud's brokers unresponsive and won't auto-decom anything. Check current controller location with `rpk cluster health` (`controller_id` field), then force the controller to a low-RTT cloud:
 
 ```bash
 rpk cluster partitions transfer-leadership --partition redpanda/controller/0:<broker-id-in-low-RTT-cloud>
@@ -745,8 +745,8 @@ Found during the partial validation pass on 2026-05-01:
     - Verify each cluster's node external IPs can reach the others' on UDP 51871: `nc -uvz <peer-node-public-ip> 51871`
     - If using AWS, ensure nodes are in *public subnets with auto-assigned public IPs* (this repo's TF does this) — pods behind a NAT gateway add an extra hop that breaks WireGuard's symmetry assumptions.
     - Drop the MTU explicitly: `cilium install ... --set MTU=1380` (default tunnel MTU may not account for Geneve + WG overhead on every cloud's underlying network).
-- **`node_status_rpc` 100ms timeout.** Inherits the same constraint we hit on AWS in the same-cloud beta. Cross-cloud RTT is more variable than same-region — pick clouds in the same physical area (US East Coast triple: `us-east-1` / `us-east1` / `eastus` ~5-15 ms pairwise) and lean on `default_leaders_preference: "racks:aws,gcp,azure"` to keep the controller in the lowest-RTT cloud.
+- **`node_status_rpc` 100ms timeout.** Inherits the same constraint we hit on AWS in the same-cloud beta. Cross-cloud RTT is more variable than same-region — pick clouds in the same physical area (US East Coast triple: `us-east-1` / `us-east1` / `eastus` \~5-15 ms pairwise) and lean on `default_leaders_preference: "racks:aws,gcp,azure"` to keep the controller in the lowest-RTT cloud.
 - **Public node IPs.** Every node is in a public subnet with a public IP for direct cross-cloud reachability. Production should use SD-WAN / IPsec VPN between clouds and put nodes in private subnets — left as an exercise.
-- **Cilium WireGuard MTU.** Geneve + WireGuard adds ~80 bytes of overhead. If you see PMTU issues, override Cilium's MTU (`--set MTU=1380`).
+- **Cilium WireGuard MTU.** Geneve + WireGuard adds \~80 bytes of overhead. If you see PMTU issues, override Cilium's MTU (`--set MTU=1380`).
 - **Cross-cloud egress cost.** Already mentioned, worth repeating.
 - **GKE Dataplane V2 + Cilium ClusterMesh are mutually exclusive.** GKE DPv2 *is* Cilium internally but Google's fork doesn't support clustermesh. The Terraform here picks `LEGACY_DATAPATH` so we can install standard upstream Cilium.
