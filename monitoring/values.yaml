@@ -68,13 +68,21 @@ grafana:
   # provisions it as a Grafana dashboard automatically. We label
   # monitoring/redpanda-dashboard-cm.yaml with grafana_dashboard=1 so the
   # Redpanda dashboard shows up without manual import.
+  #
+  # Do NOT set `folder: Redpanda` (or any non-default folder name): the
+  # kube-prometheus-stack sidecar tries to create the folder via the
+  # Grafana API at startup, fails with `Error: insufficient privileges
+  # to create Redpanda`, and then SKIPS EVERY DASHBOARD. Caught during
+  # 2026-05-04 e2e v3 — every chart-bundled dashboard plus our
+  # redpanda-dashboard ConfigMap was being silently dropped. Letting
+  # dashboards land in the default "General" folder bypasses the folder
+  # creation entirely and they all load.
   sidecar:
     dashboards:
       enabled: true
       label: grafana_dashboard
       labelValue: "1"
       searchNamespace: ALL
-      folder: Redpanda
     datasources:
       enabled: true
   resources:
