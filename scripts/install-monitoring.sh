@@ -91,8 +91,10 @@ if [[ -n "$KPS_VERSION" ]]; then
   VERSION_ARG="--version $KPS_VERSION"
 fi
 
-declare -A URLS
-declare -A PASSWORDS
+# macOS ships bash 3.2 (no `declare -A`) — use parallel arrays for portability.
+CTX_LIST=()
+URL_LIST=()
+PW_LIST=()
 
 for ctx in $CONTEXTS; do
   log "=== $ctx ==="
@@ -139,8 +141,9 @@ for ctx in $CONTEXTS; do
   admin_pw=$(kubectl --context "$ctx" -n "$NAMESPACE" get secret "$RELEASE-grafana" \
     -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d)
 
-  URLS[$ctx]="${url:-<LB pending — re-check: kubectl --context $ctx -n $NAMESPACE get svc $RELEASE-grafana>}"
-  PASSWORDS[$ctx]="${admin_pw:-<unable to read $RELEASE-grafana secret>}"
+  CTX_LIST+=("$ctx")
+  URL_LIST+=("${url:-<LB pending — re-check: kubectl --context $ctx -n $NAMESPACE get svc $RELEASE-grafana>}")
+  PW_LIST+=("${admin_pw:-<unable to read $RELEASE-grafana secret>}")
 done
 
 cat >&2 <<EOF
@@ -150,14 +153,16 @@ cat >&2 <<EOF
 ============================================================
 
 EOF
-for ctx in $CONTEXTS; do
+i=0
+for ctx in "${CTX_LIST[@]}"; do
   cat >&2 <<EOF
   $ctx:
-    URL:    ${URLS[$ctx]}
-    Login:  admin / ${PASSWORDS[$ctx]}
+    URL:    ${URL_LIST[$i]}
+    Login:  admin / ${PW_LIST[$i]}
     Scrape: only this cluster's local Redpanda brokers (via PodMonitor)
 
 EOF
+  i=$((i + 1))
 done
 cat >&2 <<EOF
   Each cloud's Grafana shows ONLY that cloud's brokers. To see all 5

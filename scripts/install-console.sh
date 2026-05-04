@@ -61,7 +61,11 @@ if [[ -n "$CONSOLE_VERSION" ]]; then
   VERSION_ARG="--version $CONSOLE_VERSION"
 fi
 
-declare -A URLS
+# macOS ships bash 3.2 by default which doesn't support `declare -A`
+# (associative arrays). Use a parallel-arrays pattern instead so the
+# script runs on macOS and Linux without bash >= 4.
+CTX_LIST=()
+URL_LIST=()
 
 for ctx in $CONTEXTS; do
   log "=== $ctx ==="
@@ -88,7 +92,8 @@ for ctx in $CONTEXTS; do
     if [[ -n "$ip" ]]; then url="http://$ip:8080"; break; fi
     sleep 5
   done
-  URLS[$ctx]="${url:-<LB pending — re-check: kubectl --context $ctx -n $NAMESPACE get svc console>}"
+  CTX_LIST+=("$ctx")
+  URL_LIST+=("${url:-<LB pending — re-check: kubectl --context $ctx -n $NAMESPACE get svc console>}")
 done
 
 cat >&2 <<EOF
@@ -98,13 +103,15 @@ cat >&2 <<EOF
 ============================================================
 
 EOF
-for ctx in $CONTEXTS; do
+i=0
+for ctx in "${CTX_LIST[@]}"; do
   cat >&2 <<EOF
   $ctx:
-    URL:   ${URLS[$ctx]}
+    URL:   ${URL_LIST[$i]}
     Auth:  none (Console OSS — demo posture)
 
 EOF
+  i=$((i + 1))
 done
 cat >&2 <<EOF
   Each cloud's Console points at its own headless redpanda Service via
