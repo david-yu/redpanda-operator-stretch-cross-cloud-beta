@@ -621,7 +621,46 @@ Rough estimate (`us-east-1` / `us-east1` / `eastus`):
 
 The broker PVC line item is the 2026-05-03 sizing change (`spec.storage.persistentVolume.size: 200Gi` per cloud). At the chart's old default 20Gi the disk subtotal was ~$0.01/hr (negligible) but the cluster crashed every ~11 minutes under the OMB 30 MB/s × RF=5 demo workload. 200Gi gives a multi-hour Demo A window for ~$0.11/hr more.
 
-On top: **inter-cloud egress** at the ~$0.05–$0.15/GB tier on every provider. Even idle, broker-to-broker raft heartbeats + Cilium clustermesh-apiserver sync + BGP keepalives add up. Plan for **$5–$30/day in egress** alone for a quiet test cluster, much more under load.
+### Cross-cloud egress (the dominant cost under load)
+
+The compute subtotal above is the floor. Cross-cloud network egress is the variable that scales with throughput and **dominates total cost during the OMB demo workload**.
+
+**Per-provider egress rates** (public list price, US-region origins, traffic leaving the cloud's AS — including over the IPsec VPN, which is billed at standard internet-egress rates by all three providers):
+
+| Origin | Rate | Notes |
+|---|---|---|
+| AWS (us-east-1) | $0.09/GB | Standard internet egress. AWS Site-to-Site VPN traffic is billed at this rate; the per-VPN-connection $0.05/hr is already in the fixed-cost subtotal. First 100 GB/month free across the account. |
+| GCP (us-east1) | $0.12/GB | Internet egress to "Worldwide destinations excluding China and Australia". Cloud Interconnect / Cloud VPN traffic uses the same rate. |
+| Azure (eastus) | $0.087/GB | Internet egress (first 100 GB/month free). VPN Gateway data transfer uses standard egress pricing. |
+
+**What the OMB demo workload actually costs in egress.** With OMB producing 30 MB/s on the AWS-pinned leader brokers (`ordered_racks:aws,gcp,azure`), every record gets replicated to all 4 followers:
+
+- 2 AWS-local followers → no egress (intra-VPC)
+- 2 GCP followers → 30 MB/s × 2 = 60 MB/s out of AWS, 0 inbound charge on GCP
+- 1 Azure follower → 30 MB/s × 1 = 30 MB/s out of AWS
+
+So the producer side (AWS) emits **~90 MB/s = ~324 GB/hr cross-cloud** under sustained 30 MB/s OMB load. At AWS's $0.09/GB:
+
+- **~$29.16/hr in AWS egress under 30 MB/s OMB sustained load**
+
+The OMB consumer adds back-pressure on whichever cloud the consumer pod runs in (we run it on rp-aws, so most consume traffic stays AWS-local). If you move the consumer to rp-gcp or rp-azure, expect another ~$15–$30/hr of egress out of GCP / Azure for the consume path.
+
+**Idle cost** (no client traffic, brokers + operators + clustermesh sync + BGP keepalives):
+
+- Broker raft heartbeats: ~5–10 KB/s per peer pair × 10 cross-cloud broker pairs ≈ 100 KB/s ≈ 350 MB/hr ≈ **$0.03/hr**
+- Cilium clustermesh-apiserver KVStoreMesh sync: ~10 KB/s per peer pair × 6 pairs ≈ 60 KB/s ≈ **$0.02/hr**
+- Operator multicluster raft: similar order, **$0.01/hr**
+- BGP keepalives over VPN tunnels: trivial, **<$0.01/hr**
+- **Idle egress total: ~$0.06–$0.10/hr** (matches the README's prior "$5–$30/day idle" claim — closer to the lower end with the static-routes VPN config we now ship)
+
+**Summary**:
+
+| Mode | Compute + LB + storage | Cross-cloud egress | Total |
+|---|---|---|---|
+| Idle (cluster up, no client traffic) | $2.21/hr | ~$0.08/hr | **~$2.29/hr** |
+| Demo A run (30 MB/s OMB, RF=5, AWS-pinned leaders) | $2.21/hr | **~$29/hr** | **~$31/hr** |
+
+A Demo A run that takes ~3-4 hours of bring-up + walkthrough + teardown lands at **~$30 in compute + ~$60–$120 in egress** depending on how long OMB runs. Drop OMB throughput proportionally for cheaper iterations — `--throughput 1280 --record-size 1024` (the same-cloud beta's ~10 Mbps default) cuts egress 24× to ~$1.20/hr.
 
 Tear down promptly when you're done validating.
 
