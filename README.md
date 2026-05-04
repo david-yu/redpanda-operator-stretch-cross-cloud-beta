@@ -451,7 +451,24 @@ After login:
 | **Per-region broker view** | Use the dashboard's `instance` or `pod` variable selector at the top — filter to `redpanda-rp-aws-*` / `redpanda-rp-gcp-*` / `redpanda-rp-azure-*` | Same metrics scoped to one cluster's brokers |
 | **Cross-cluster aggregate** | Sum panels (default view) | All 5 brokers' metrics aggregated across clouds — Prometheus's cross-cluster Endpoints SD picks them all up via the operator's flat-mode EndpointSlices on rp-aws (no per-cluster federation needed) |
 
-> **If "Dashboards → Browse" is empty after login**, the sidecar's dashboard provisioning probably failed. Check `kubectl --context rp-aws -n monitoring logs deployment/monitoring-grafana -c grafana-sc-dashboard` — should show `Writing /tmp/dashboards/<name>.json (ascii)` for each chart-bundled and our redpanda-dashboard ConfigMap. If it shows `Error: insufficient privileges to create <FolderName>. Skipping ...` for every dashboard, the `sidecar.dashboards.folder` value is set to a non-default Grafana folder name and the sidecar can't create it — drop the `folder:` field from `monitoring/values.yaml` and `helm upgrade`. (This was caught and fixed during 2026-05-04 e2e v3 — the repo's current `monitoring/values.yaml` doesn't set a folder, so a fresh install lands dashboards in the General folder by default.)
+> **If "Dashboards → Browse" is empty after login**, the sidecar's dashboard provisioning probably failed. Check `kubectl --context rp-aws -n monitoring logs deployment/monitoring-grafana -c grafana-sc-dashboard` — should show `Writing /tmp/dashboards/<name>.json (ascii)` for each chart-bundled and our redpanda-dashboard ConfigMap. Failure modes seen during 2026-05-04 e2e v3:
+>
+> 1. **`Error: insufficient privileges to create <FolderName>. Skipping ...` on every dashboard** — the chart's `sidecar.dashboards.folder` setting was overridden to a non-default value (`Redpanda` in our case). The chart uses that field as the *shared-volume mount path* between sidecar and main Grafana container, AND as the relative directory the sidecar writes to. A non-default value lands files at a relative path Grafana provisioning can't reach (`stat Redpanda: no such file or directory`). Repo's current `monitoring/values.yaml` doesn't set the folder so chart default `/tmp/dashboards` applies — but if you've inherited a stale install, run:
+>     ```bash
+>     helm --kube-context rp-aws upgrade monitoring prometheus-community/kube-prometheus-stack \
+>       -n monitoring --no-hooks --reset-values \
+>       -f monitoring/values.yaml
+>     ```
+>     `--no-hooks` is needed because the chart's pre-upgrade `monitoring-kube-prometheus-admission-create` Job can hit `context deadline exceeded` on a re-upgrade and block the values rollout.
+>
+> 2. **Sidecar log shows `Should have added FOLDER as environment variable! Exit`** — `FOLDER` env was unset (e.g., from `kubectl set env ... FOLDER-`). Add it back: `kubectl set env deploy/monitoring-grafana -c grafana-sc-dashboard FOLDER=/tmp/dashboards`.
+>
+> Verify dashboards loaded by hitting the Grafana API:
+> ```bash
+> GPASS=$(kubectl --context rp-aws -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 -d)
+> GURL=$(kubectl --context rp-aws -n monitoring get svc monitoring-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+> curl -s -u "admin:$GPASS" "http://$GURL/api/search?query=&type=dash-db" | jq '. | length'   # should print ~24
+> ```
 
 What each piece is doing under the hood:
 
