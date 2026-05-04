@@ -145,7 +145,7 @@ Within a single cluster the broker traffic stays inside that cloud's VPC/VNet �
 │   └── README.md
 ├── monitoring/
 │   ├── values.yaml             # kube-prometheus-stack values: Grafana LB + dashboard sidecar
-│   └── redpanda-scrape.yaml    # cross-cluster scrape config (Endpoints SD on the redpanda Service)
+│   └── redpanda-podmonitor.yaml # per-cloud PodMonitor: each cluster's Prometheus scrapes only LOCAL broker pods
 └── scripts/
     ├── install-cilium.sh       # per-cloud Cilium install
     ├── connect-mesh.sh         # enable + connect 3-way Cilium ClusterMesh
@@ -154,7 +154,7 @@ Within a single cluster the broker traffic stays inside that cloud's VPC/VNet �
     ├── annotate-rack.sh        # idempotent re-annotation of nodes — re-run after any GKE/EKS/AKS resize, autoscaler add, or Demo B capacity-injection step
     ├── install-console.sh      # Console on rp-aws (LB + URL printed at end)
     ├── install-omb.sh          # creates load-test topic + applies OMB Jobs (\~30 MB/s)
-    ├── install-monitoring.sh   # kube-prometheus-stack + Redpanda dashboard, prints Grafana URL+creds
+    ├── install-monitoring.sh   # kube-prometheus-stack + 3 Redpanda dashboards on EVERY cluster (per-cloud design); prints 3 Grafana URLs+creds
     └── teardown.sh             # full multi-cloud teardown (uninstalls demo addons first)
 ```
 
@@ -404,7 +404,7 @@ All three install on **rp-aws only** — the controller is pinned there (`defaul
 
 ```bash
 ./scripts/install-console.sh        # Redpanda Console on rp-aws
-./scripts/install-monitoring.sh     # kube-prometheus-stack on rp-aws
+./scripts/install-monitoring.sh     # kube-prometheus-stack on EVERY cluster (3 Grafana URLs at the end)
 ./scripts/install-omb.sh            # \~30 MB/s producer + consumer Jobs
 ```
 
@@ -429,32 +429,37 @@ After login (the URL you got from `install-console.sh` or the command above):
 | **Brokers** | left nav → "Brokers" | all 5 brokers, their RACK column, IS-ALIVE state — most useful pane during Demo A's cordon-restore cycle |
 | **Consumer Groups** | left nav → "Consumer groups" → `omb-consumer` | per-partition lag for the OMB consumer, real-time during failover |
 
-#### Accessing Grafana
+#### Accessing Grafana (one per cloud)
 
-Grafana (Helm chart `prometheus-community/kube-prometheus-stack`) is exposed via an NLB in the `monitoring` namespace. **Login: `admin` + auto-generated password.**
+`install-monitoring.sh` deploys `prometheus-community/kube-prometheus-stack` on **every** cluster (rp-aws, rp-gcp, rp-azure). Each cloud's Prometheus scrapes only its own local broker pods (via the `redpanda-brokers` PodMonitor in `monitoring/redpanda-podmonitor.yaml`); each cloud's Grafana queries only its own Prometheus. **Login: `admin` + per-cloud auto-generated password.**
+
+> **Why per-cloud, not centralized:** the centralized model (single Prometheus + Grafana on rp-aws) loses all observability the moment AWS gets cordoned — exactly Demo B's scenario. Per-cloud keeps each cloud's view alive when its peers are down. Trade-off: ~$0.30/hr extra compute (3× Prometheus + Grafana). The egress saving from not scraping cross-cloud is ~$0.01/hr — but survivability is the headline reason. For a unified all-broker view, layer Thanos / Cortex / Mimir on top (out of scope here).
 
 ```bash
-# print URL + creds anytime:
-echo "URL:  http://$(kubectl --context rp-aws -n monitoring get svc monitoring-grafana \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
-echo "User: admin"
-echo "Pass: $(kubectl --context rp-aws -n monitoring get secret monitoring-grafana \
-  -o jsonpath='{.data.admin-password}' | base64 -d)"
+# print URL + creds for all 3 clouds:
+for ctx in rp-aws rp-gcp rp-azure; do
+  echo "=== $ctx ==="
+  echo "URL:  http://$(kubectl --context $ctx -n monitoring get svc monitoring-grafana \
+    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')"
+  echo "User: admin"
+  echo "Pass: $(kubectl --context $ctx -n monitoring get secret monitoring-grafana \
+    -o jsonpath='{.data.admin-password}' | base64 -d)"
+done
 ```
 
 After login (left nav → Dashboards (four-square icon) → Browse → **General** folder):
 
-`install-monitoring.sh` pre-loads **three Redpanda dashboards** sourced from [redpanda-data/observability](https://github.com/redpanda-data/observability) (same source `rpk generate grafana-dashboard --dashboard <name>` uses). The kube-prometheus-stack chart's ~20 bundled Kubernetes dashboards are explicitly disabled (`grafana.defaultDashboardsEnabled: false` in `monitoring/values.yaml`) to keep the Grafana UI focused on Redpanda.
+`install-monitoring.sh` pre-loads **three Redpanda dashboards** on every cloud's Grafana, sourced from [redpanda-data/observability](https://github.com/redpanda-data/observability) (same source `rpk generate grafana-dashboard --dashboard <name>` uses). The kube-prometheus-stack chart's ~20 bundled Kubernetes dashboards are explicitly disabled (`grafana.defaultDashboardsEnabled: false` in `monitoring/values.yaml`) to keep the Grafana UI focused on Redpanda.
 
 | What you want to see | Open this dashboard | Notes |
 |---|---|---|
-| **Broker health, throughput, latency, leader counts by rack** | **Redpanda Ops Dashboard** | 41-panel KPI view. Best dashboard for Demo A's "watch leaders migrate aws → gcp → aws" — leader-count panel is grouped by `rack` label. Also shows under-replicated partitions, leader elections, p50/p95/p99 latency. |
-| **Disk pressure on each broker (free bytes, used%)** | **Redpanda Ops Dashboard** → "Disk usage" panel | `redpanda_storage_disk_free_bytes` / `_total_bytes`. Watch this during Demo B — `Over Disk Limit Nodes` showed up here first. Compare against the autobalancer's `partition_autobalancing_max_disk_usage_percent: 80` threshold (committed in `<cloud>/manifests/stretchcluster.yaml`). |
-| **OMB throughput on `load-test` (produce + consume rates per-topic)** | **Kafka Topic Metrics** | Filter to topic=`load-test` (variable selector at top). Shows the ~30 MB/s OMB producer rate, consumer drain rate, on-disk size — most direct view of OMB activity. |
-| **Aggregate broker-side throughput / consumer breakdown** | **Redpanda Default Dashboard** | Legacy single-pane view; covers the same metrics as Ops + Topic Metrics in less detail but on one page. Filter `instance` / `pod` to scope to one rack if needed. |
-| **Per-region broker view** | Any dashboard's `instance` / `pod` variable selector at the top | Filter to `redpanda-rp-aws-*` / `redpanda-rp-gcp-*` / `redpanda-rp-azure-*` to scope to one cluster's brokers. |
-| **Cross-cluster aggregate (all 5 brokers, no filter)** | Default view (no variable filter) | All brokers' metrics aggregated across clouds — Prometheus's cross-cluster Endpoints SD picks them all up via the operator's flat-mode EndpointSlices on rp-aws (no per-cluster federation needed). |
-| **More dashboards (consumer offsets, consumer-metrics, serverless)** | `kubectl exec` into a broker, run `rpk generate grafana-dashboard --dashboard <name>` and import the printed JSON into Grafana via "+" → Import | Available dashboard names: `operations`, `topic-metrics`, `consumer-metrics`, `consumer-offsets`, `serverless`. The first two are pre-loaded; the rest are available on-demand. |
+| **Broker health, throughput, latency, leader counts by rack — for THIS cloud's brokers** | **Redpanda Ops Dashboard** on the cloud you care about | 41-panel KPI view. Each cloud's Grafana shows only its own brokers (rp-aws Grafana → 2 AWS brokers; rp-gcp → 2 GCP brokers; rp-azure → 1 Azure broker). |
+| **Demo A leader migration aws → gcp → aws** | **Redpanda Ops Dashboard** on **rp-gcp** Grafana during the AWS cordon window | rp-aws Grafana goes dark when AWS is cordoned (its Prometheus pods are unreachable too). Open rp-gcp's Grafana and watch the 2 GCP brokers' leader count climb from 0 to ~12 during the cordon window. |
+| **Disk pressure (the Demo B blocker) on the GCP brokers** | **Redpanda Ops Dashboard** on **rp-gcp** Grafana → "Disk usage" panel | During Demo B's capacity injection, rp-gcp's Grafana is the right view — its Prometheus is local to GCP and keeps scraping even if rp-aws is cordoned. |
+| **OMB throughput on `load-test`** | **Kafka Topic Metrics** on **rp-aws** Grafana (where OMB runs) | OMB Jobs run in the `redpanda` namespace on rp-aws, so its produce/consume rate appears in rp-aws Grafana's local view of the load-test topic. |
+| **Aggregate broker-side throughput / consumer breakdown** | **Redpanda Default Dashboard** | Legacy single-pane view; per-cloud, scoped to local brokers only. |
+| **Cross-cluster all-5-brokers aggregate** | Currently requires hopping between the 3 Grafanas, OR layering Thanos / Cortex / Mimir on top of the per-cloud Prometheuses | Out of scope for this scaffold. The per-cloud design optimizes for survivability over cross-cluster correlation. |
+| **More dashboards (consumer offsets, consumer-metrics, serverless)** | `kubectl exec` into a broker, run `rpk generate grafana-dashboard --dashboard <name>` and import the printed JSON into Grafana via "+" → Import | Available dashboard names: `operations`, `topic-metrics`, `consumer-metrics`, `consumer-offsets`, `serverless`. The first three are pre-loaded; the rest are available on-demand. |
 
 > **If "Dashboards → Browse" is empty after login**, the sidecar's dashboard provisioning probably failed. Check `kubectl --context rp-aws -n monitoring logs deployment/monitoring-grafana -c grafana-sc-dashboard` — should show `Writing /tmp/dashboards/<name>.json (ascii)` for each chart-bundled and our redpanda-dashboard ConfigMap. Failure modes seen during 2026-05-04 e2e v3:
 >
@@ -826,9 +831,10 @@ Rough estimate (`us-east-1` / `us-east1` / `eastus`):
 | Azure VPN Gateway (VpnGw1 sku) | $0.19 |
 | Cross-cloud LBs (3× NLB / Standard LB) | \~$0.07 |
 | Cilium clustermesh-apiserver LB (3 of) | \~$0.05 |
-| Console + Grafana NLBs on rp-aws (step 9, only when running the demo addons) | \~$0.04 |
+| Console NLB on rp-aws (step 9, only when running the demo addons) | \~$0.02 |
+| Per-cloud Prometheus + Grafana (3× pods + 3× LBs across clouds) | \~$0.30 |
 | Broker data PVCs (5× 500Gi: 2 EBS gp3 on AWS, 2 pd-balanced on GCP, 1 Azure Managed Disk Standard) | \~$0.30 |
-| **Compute + VPN + LB + storage subtotal** | **\~$2.39/hr** |
+| **Compute + VPN + LB + storage subtotal** | **\~$2.65/hr** |
 
 The broker PVC line item is sized for both Demo A and Demo B. Sizing iterations:
 

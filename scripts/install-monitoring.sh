@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
-# scripts/install-monitoring.sh — deploy kube-prometheus-stack on rp-aws
-# with a Redpanda-aware scrape config that covers all 5 brokers across the
-# 3 clouds, plus an auto-provisioned Redpanda Grafana dashboard.
+# scripts/install-monitoring.sh — deploy a kube-prometheus-stack +
+# Grafana on EVERY cluster (rp-aws, rp-gcp, rp-azure). Each Prometheus
+# scrapes ONLY its local cluster's broker pods (via the PodMonitor in
+# monitoring/redpanda-podmonitor.yaml).
 #
-# Why rp-aws only: the operator's flat-mode EndpointSlices put all peer
-# broker pod IPs into the headless `redpanda` Service on this cluster, and
-# Cilium ClusterMesh routes pod-to-pod across clouds — so a single
-# Prometheus here reaches all 5 brokers' /public_metrics endpoints.
+# Why per-cloud (not centralized on rp-aws):
+#   1. Survivability — when AWS is cordoned (Demo B's failure mode),
+#      the centralized design loses all observability at the moment
+#      you most need it. Per-cloud Grafana on rp-gcp / rp-azure
+#      keeps showing local broker metrics through the outage.
+#   2. No cross-cloud egress on the metrics path.
+#   3. Trade-off: ~$0.30/hr in extra compute (3× Prometheus + Grafana).
+#      Worth it for survivability; egress saving alone wouldn't be.
 #
 # Outputs at the end:
-#   - Grafana URL (NLB hostname, port 80)
-#   - Grafana admin user (admin) + auto-generated password (read out of
-#     the chart's <release>-grafana Secret — never written to disk and
-#     never committed)
+#   - 3 Grafana URLs (one per cloud, each printing its own auto-generated
+#     admin password from the local <release>-grafana Secret).
 #
 # Usage:
-#   ./scripts/install-monitoring.sh
+#   ./scripts/install-monitoring.sh                      # all 3 clusters
+#   CONTEXTS="rp-aws" ./scripts/install-monitoring.sh    # one cluster
 #
 # Env (optional):
-#   CTX        — kube-context (default: rp-aws)
-#   NAMESPACE  — namespace (default: monitoring)
-#   RELEASE    — helm release name (default: monitoring)
+#   CONTEXTS    — space-separated kube-contexts (default: "rp-aws rp-gcp rp-azure")
+#   NAMESPACE   — namespace (default: monitoring)
+#   RELEASE     — helm release name (default: monitoring)
 #   KPS_VERSION — chart version pin (default: latest)
 
 set -uo pipefail
@@ -28,26 +32,23 @@ set -uo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 
-CTX=${CTX:-rp-aws}
+CONTEXTS=${CONTEXTS:-rp-aws rp-gcp rp-azure}
 NAMESPACE=${NAMESPACE:-monitoring}
 RELEASE=${RELEASE:-monitoring}
 KPS_VERSION=${KPS_VERSION:-}
 
 # Redpanda Grafana dashboards from redpanda-data/observability (the same
 # source `rpk generate grafana-dashboard --dashboard <name>` pulls from
-# at runtime). We pre-load three:
+# at runtime). We pre-load three on EACH cluster's Grafana:
 #
-#   Ops dashboard           — broker KPI + health (throughput, latency,
-#                             disk free bytes, leadership distribution
-#                             by rack, URP, leader elections). 41 panels.
-#                             Best for Demo A's "watch leaders move"
-#                             view AND Demo B's disk-pressure view AND
-#                             general broker health.
-#   Default dashboard       — broker-side throughput / consumer / topic
-#                             breakdown panels in a single legacy view.
-#   Topic Metrics dashboard — per-topic produce/consume rates and on-disk
-#                             sizes. Filter to topic=load-test for live
-#                             OMB throughput observation.
+#   Ops dashboard           — 41-panel KPI + health view (throughput,
+#                             latency, disk free bytes, leadership by
+#                             rack, URP, leader elections).
+#   Default dashboard       — broker-side throughput + consumer + topic
+#                             breakdown in a single legacy view.
+#   Topic Metrics dashboard — per-topic produce/consume rates + on-disk
+#                             size; filter to topic=load-test for live
+#                             OMB throughput.
 #
 # All three drop into the General folder via the sidecar (chart default
 # at /tmp/dashboards). Chart-bundled K8s dashboards (apiserver / nodes /
@@ -73,89 +74,100 @@ log "ensuring prometheus-community helm repo is registered"
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null
 helm repo update >/dev/null
 
-log "creating namespace $NAMESPACE on $CTX (idempotent)"
-kubectl --context "$CTX" create namespace "$NAMESPACE" --dry-run=client -o yaml | \
-  kubectl --context "$CTX" apply -f - >/dev/null
-
-# Inject the cross-cluster scrape config as a Secret so kube-prometheus-stack
-# can pick it up via `additionalScrapeConfigsSecret`. The Secret content is
-# the YAML list in monitoring/redpanda-scrape.yaml (the chart concatenates
-# it into prometheus's full scrape_configs list).
-log "creating redpanda-additional-scrape-configs Secret"
-kubectl --context "$CTX" -n "$NAMESPACE" create secret generic redpanda-additional-scrape-configs \
-  --from-file=scrape.yaml="$REPO_ROOT/monitoring/redpanda-scrape.yaml" \
-  --dry-run=client -o yaml | kubectl --context "$CTX" apply -f - >/dev/null
+# Pre-fetch dashboards once (same JSONs apply to all 3 clusters).
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+for entry in "${DASHBOARD_URLS[@]}"; do
+  url=${entry%|*}
+  fname="$(basename "$url")"
+  log "fetching $fname"
+  if ! curl -fsSL "$url" -o "$tmp/$fname"; then
+    log "  WARNING: could not fetch $fname — skipping (Grafana will still work, just without this dashboard)"
+  fi
+done
 
 VERSION_ARG=""
 if [[ -n "$KPS_VERSION" ]]; then
   VERSION_ARG="--version $KPS_VERSION"
 fi
 
-log "helm upgrade --install $RELEASE prometheus-community/kube-prometheus-stack"
-# shellcheck disable=SC2086
-helm --kube-context "$CTX" upgrade --install "$RELEASE" prometheus-community/kube-prometheus-stack \
-  -n "$NAMESPACE" $VERSION_ARG \
-  -f "$REPO_ROOT/monitoring/values.yaml" \
-  --wait --timeout 10m
+declare -A URLS
+declare -A PASSWORDS
 
-# Pull each Redpanda dashboard JSON and load as a labelled ConfigMap.
-# The Grafana sidecar (label=grafana_dashboard, value=1) auto-imports.
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-for entry in "${DASHBOARD_URLS[@]}"; do
-  url=${entry%|*}
-  cm=${entry##*|}
-  fname="$(basename "$url")"
-  log "fetching $fname"
-  if ! curl -fsSL "$url" -o "$tmp/$fname"; then
-    log "  WARNING: could not fetch $fname — skipping (Grafana will still work, just without this dashboard)"
-    continue
-  fi
-  kubectl --context "$CTX" -n "$NAMESPACE" create configmap "$cm" \
-    --from-file="$fname=$tmp/$fname" \
-    --dry-run=client -o yaml | \
-    kubectl --context "$CTX" label --local --dry-run=client -f - grafana_dashboard=1 -o yaml | \
-    kubectl --context "$CTX" apply -f - >/dev/null \
-    && log "  loaded as ConfigMap $cm"
+for ctx in $CONTEXTS; do
+  log "=== $ctx ==="
+
+  log "  creating namespace $NAMESPACE (idempotent)"
+  kubectl --context "$ctx" create namespace "$NAMESPACE" --dry-run=client -o yaml | \
+    kubectl --context "$ctx" apply -f - >/dev/null
+
+  log "  helm upgrade --install $RELEASE prometheus-community/kube-prometheus-stack"
+  # shellcheck disable=SC2086
+  helm --kube-context "$ctx" upgrade --install "$RELEASE" prometheus-community/kube-prometheus-stack \
+    -n "$NAMESPACE" $VERSION_ARG \
+    -f "$REPO_ROOT/monitoring/values.yaml" \
+    --wait --timeout 10m | tail -3
+
+  log "  applying PodMonitor for local cluster's broker pods"
+  kubectl --context "$ctx" apply -f "$REPO_ROOT/monitoring/redpanda-podmonitor.yaml" 2>&1 | tail -1
+
+  log "  loading dashboard ConfigMaps (Ops, Default, Topic Metrics)"
+  for entry in "${DASHBOARD_URLS[@]}"; do
+    url=${entry%|*}
+    cm=${entry##*|}
+    fname="$(basename "$url")"
+    [[ -f "$tmp/$fname" ]] || continue
+    kubectl --context "$ctx" -n "$NAMESPACE" create configmap "$cm" \
+      --from-file="$fname=$tmp/$fname" \
+      --dry-run=client -o yaml | \
+      kubectl --context "$ctx" label --local --dry-run=client -f - grafana_dashboard=1 -o yaml | \
+      kubectl --context "$ctx" apply -f - >/dev/null
+  done
+
+  log "  waiting for Grafana LoadBalancer to receive a public hostname (max 5m)"
+  url=""
+  for _ in $(seq 1 60); do
+    hostname=$(kubectl --context "$ctx" -n "$NAMESPACE" get svc "$RELEASE-grafana" \
+      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+    ip=$(kubectl --context "$ctx" -n "$NAMESPACE" get svc "$RELEASE-grafana" \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+    if [[ -n "$hostname" ]]; then url="http://$hostname"; break; fi
+    if [[ -n "$ip" ]]; then url="http://$ip"; break; fi
+    sleep 5
+  done
+
+  admin_pw=$(kubectl --context "$ctx" -n "$NAMESPACE" get secret "$RELEASE-grafana" \
+    -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d)
+
+  URLS[$ctx]="${url:-<LB pending — re-check: kubectl --context $ctx -n $NAMESPACE get svc $RELEASE-grafana>}"
+  PASSWORDS[$ctx]="${admin_pw:-<unable to read $RELEASE-grafana secret>}"
 done
-
-log "waiting for Grafana LoadBalancer to receive a public hostname (max 5m)"
-url=""
-for _ in $(seq 1 60); do
-  hostname=$(kubectl --context "$CTX" -n "$NAMESPACE" get svc "$RELEASE-grafana" \
-    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
-  ip=$(kubectl --context "$CTX" -n "$NAMESPACE" get svc "$RELEASE-grafana" \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-  if [[ -n "$hostname" ]]; then
-    url="http://$hostname"; break
-  elif [[ -n "$ip" ]]; then
-    url="http://$ip"; break
-  fi
-  sleep 5
-done
-
-# Read the auto-generated admin password out of the secret. This stays in
-# the cluster — we print it to the operator's terminal once and never
-# write it to disk.
-admin_pw=$(kubectl --context "$CTX" -n "$NAMESPACE" get secret "$RELEASE-grafana" \
-  -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d)
 
 cat >&2 <<EOF
 
 ============================================================
-  Prometheus + Grafana deployed on $CTX (namespace: $NAMESPACE)
+  Prometheus + Grafana deployed on each cloud (per-cloud design)
 ============================================================
 
-  Grafana URL:      ${url:-<LB pending — re-check: kubectl --context $CTX -n $NAMESPACE get svc $RELEASE-grafana>}
-  Grafana login:    admin / ${admin_pw:-<unable to read $RELEASE-grafana secret>}
-  Dashboard:        Dashboards → Redpanda → "Kubernetes Redpanda"
+EOF
+for ctx in $CONTEXTS; do
+  cat >&2 <<EOF
+  $ctx:
+    URL:    ${URLS[$ctx]}
+    Login:  admin / ${PASSWORDS[$ctx]}
+    Scrape: only this cluster's local Redpanda brokers (via PodMonitor)
 
-  Prometheus is configured with a cross-cluster scrape job that picks up
-  every broker pod's /public_metrics across all 3 clouds via the
-  operator's flat-mode EndpointSlices.
+EOF
+done
+cat >&2 <<EOF
+  Each cloud's Grafana shows ONLY that cloud's brokers. To see all 5
+  brokers in one view, hop between the 3 Grafana URLs (or stand up a
+  Thanos / Mimir / Cortex aggregation tier — out of scope here).
 
-  This password regenerates on every helm upgrade --install if you let
-  the chart auto-generate it. To keep it stable across re-installs, set
-  grafana.adminPassword in monitoring/values.yaml — but DO NOT commit
-  that change (the .gitignore covers monitoring/values.local.yaml).
+  Survives a cross-cloud outage: if rp-aws is cordoned (Demo B), rp-gcp
+  and rp-azure Grafanas keep working off their local Prometheus.
+
+  Passwords regenerate on every helm upgrade --install. Pin them by
+  setting grafana.adminPassword in monitoring/values.local.yaml
+  (.gitignored) — DO NOT commit that change.
 EOF

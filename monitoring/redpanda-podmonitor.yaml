@@ -1,0 +1,62 @@
+# PodMonitor for the LOCAL cluster's Redpanda broker pods.
+#
+# Per-cloud monitoring design (2026-05-04 e2e v3 → switched from
+# centralized): each cluster runs its own kube-prometheus-stack. Each
+# Prometheus only scrapes broker pods in its OWN cluster — it does NOT
+# do cross-cluster Endpoints SD. This way:
+#
+#   - Observability survives a cross-cloud outage. If rp-aws goes down,
+#     rp-gcp's local Grafana keeps working with rp-gcp's local brokers'
+#     metrics; same for rp-azure. The single-Prometheus-on-rp-aws design
+#     would lose all observability the moment AWS gets cordoned (which
+#     is exactly when you most want metrics — Demo B's failure mode).
+#
+#   - Cross-cloud network costs go to ~$0/hr for the metrics path
+#     (no cross-cloud scrapes). The trade-off is ~$0.30/hr in extra
+#     compute (3× Prometheus + 3× Grafana), per the cost-section
+#     analysis.
+#
+#   - Cross-cluster correlation queries are no longer trivial — each
+#     Grafana shows only that cloud's brokers. For a unified view,
+#     you'd need a federated tier (Thanos / Cortex / Mimir) which is
+#     out of scope here. Acceptable for a demo where the failure modes
+#     are observed per-cluster anyway.
+#
+# Pod-based discovery (vs the Service/Endpoints SD the centralized
+# version used) explicitly scopes to the LOCAL cluster's pods. The
+# operator's flat-mode EndpointSlices put peer-cluster broker pod IPs
+# into the local headless `redpanda` Service, which is exactly what
+# we want to AVOID for the per-cloud design — PodMonitor selects pods
+# directly by namespace + label, bypassing the EndpointSlice.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: redpanda-brokers
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - redpanda
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redpanda
+  podMetricsEndpoints:
+    - port: admin
+      path: /public_metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      scheme: http
+      relabelings:
+        - sourceLabels:
+            - __meta_kubernetes_pod_label_app_kubernetes_io_instance
+          targetLabel: rack
+          regex: rp-(.+)
+          replacement: $1
+        - sourceLabels:
+            - __meta_kubernetes_pod_name
+          targetLabel: pod
+        - sourceLabels:
+            - __meta_kubernetes_namespace
+          targetLabel: namespace

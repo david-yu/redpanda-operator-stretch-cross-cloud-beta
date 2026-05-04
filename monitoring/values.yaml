@@ -1,13 +1,22 @@
-# Helm values for prometheus-community/kube-prometheus-stack, deployed in
-# the `monitoring` namespace on rp-aws.
+# Helm values for prometheus-community/kube-prometheus-stack, deployed
+# in the `monitoring` namespace on EVERY cluster (rp-aws, rp-gcp, rp-azure).
 #
-# Why a single Prometheus on rp-aws (not one per cluster):
-# the StretchCluster operator runs in flat cross-cluster mode, so the
-# headless `redpanda` Service in this cluster's redpanda namespace has
-# EndpointSlices for *all 5 broker pod IPs* (2 AWS + 2 GCP + 1 Azure).
-# Cilium ClusterMesh routes pod-to-pod across clouds. So a single
-# Prometheus on rp-aws can scrape every broker's /public_metrics directly
-# via its peer pod IP, without per-cluster federation or Thanos.
+# Why per-cloud (not centralized on rp-aws):
+# 1. Survivability — the centralized design lost all observability the
+#    moment AWS got cordoned (Demo B's exact failure mode). Per-cloud
+#    Prometheus + Grafana keeps each cloud's view alive when its peers
+#    are down.
+# 2. No cross-cloud egress on the metrics path. Each Prometheus scrapes
+#    only LOCAL broker pods via the PodMonitor in
+#    monitoring/redpanda-podmonitor.yaml.
+# 3. The trade-off is ~$0.30/hr in extra compute (3× Prometheus +
+#    3× Grafana). Worth it — the centralized model's $0.01/hr egress
+#    saving doesn't justify losing observability during an outage.
+#
+# Same values file is applied to all 3 clusters by install-monitoring.sh.
+# No cloud-specific bits here — the chart's default Service type=LoadBalancer
+# uses each cloud's native LB (NLB on AWS, Network LB on GCP, Standard LB
+# on Azure) without explicit annotations.
 #
 # Disable Alertmanager (no alerting policies in this scaffold) and
 # kubeControllerManager / kubeScheduler / kubeEtcd (managed-K8s control
@@ -35,12 +44,9 @@ prometheus:
     podMonitorSelectorNilUsesHelmValues: false
     probeSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
-    # Cross-cluster scrape config: pick up the redpanda headless Service's
-    # EndpointSlices. With flat mode, those include all peer broker pod IPs.
-    additionalScrapeConfigsSecret:
-      enabled: true
-      name: redpanda-additional-scrape-configs
-      key: scrape.yaml
+    # Local-cluster broker scrape: defined as a PodMonitor (kept in
+    # monitoring/redpanda-podmonitor.yaml). The Prometheus operator
+    # discovers it via labels — no additionalScrapeConfigsSecret needed.
     retention: 6h
     resources:
       requests:
@@ -59,10 +65,14 @@ grafana:
   service:
     type: LoadBalancer
     port: 80
-    annotations:
-      service.beta.kubernetes.io/aws-load-balancer-type: nlb
-      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    # NO cloud-specific annotations — same values file is applied to
+    # all 3 clusters. Each cloud's default LB type works:
+    #   AWS: classic ELB (cheaper than NLB for HTTP, sufficient for
+    #        Grafana web UI; if you want NLB on AWS, add the
+    #        service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    #        annotation in a per-cloud values override).
+    #   GCP: Network Load Balancer (regional, IP-based).
+    #   Azure: Standard Load Balancer (Public IP, included in AKS).
   # We only want the Redpanda dashboards in this scaffold (Default + Ops,
   # loaded via labelled ConfigMaps by install-monitoring.sh). Disabling
   # the chart's ~20 bundled K8s dashboards (apiserver, nodes, pods,
