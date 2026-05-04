@@ -776,10 +776,16 @@ Rough estimate (`us-east-1` / `us-east1` / `eastus`):
 | Cross-cloud LBs (3× NLB / Standard LB) | \~$0.07 |
 | Cilium clustermesh-apiserver LB (3 of) | \~$0.05 |
 | Console + Grafana NLBs on rp-aws (step 9, only when running the demo addons) | \~$0.04 |
-| Broker data PVCs (5× 200Gi: 2 EBS gp3 on AWS, 2 pd-balanced on GCP, 1 Azure Managed Disk Standard) | \~$0.12 |
-| **Compute + VPN + LB + storage subtotal** | **\~$2.21/hr** |
+| Broker data PVCs (5× 500Gi: 2 EBS gp3 on AWS, 2 pd-balanced on GCP, 1 Azure Managed Disk Standard) | \~$0.30 |
+| **Compute + VPN + LB + storage subtotal** | **\~$2.39/hr** |
 
-The broker PVC line item is the 2026-05-03 sizing change (`spec.storage.persistentVolume.size: 200Gi` per cloud). At the chart's old default 20Gi the disk subtotal was \~$0.01/hr (negligible) but the cluster crashed every \~11 minutes under the OMB 30 MB/s × RF=5 demo workload. 200Gi gives a multi-hour Demo A window for \~$0.11/hr more.
+The broker PVC line item is sized for both Demo A and Demo B. Sizing iterations:
+
+- Chart default: 20Gi → cluster crashes every \~11 min under OMB 30 MB/s × RF=5 (caught 2026-05-03 e2e v1)
+- Bumped to 200Gi → Demo A runs cleanly, but Demo B's capacity-injection step re-stalls the autobalancer with `Over Disk Limit Nodes` because the new broker has to receive \~108GB of historical replica data within the 1-hour retention window while existing brokers keep serving steady-state writes (caught 2026-05-04 e2e v3)
+- Bumped to **500Gi** → 400GB usable headroom (at the 80% autobalancer threshold) absorbs catch-up + ongoing load; Demo B completes through to fully `ready` state
+
+If you don't plan to run Demo B (the capacity-injection demo), 200Gi is enough and saves \~$0.18/hr.
 
 ### Cross-cloud egress (the dominant cost under load)
 

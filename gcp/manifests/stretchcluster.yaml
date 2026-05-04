@@ -71,9 +71,9 @@ spec:
       # See aws/manifests/stretchcluster.yaml for rationale: 1-hour retention
       # keeps disk pressure bounded under the OMB 30 MB/s demo workload.
       log_retention_ms: 3600000
-  # 200Gi per-broker PVC; chart default of 20Gi is too small for the demo
+  # 500Gi per-broker PVC; chart default of 20Gi is too small for the demo
   # workload. See aws/manifests/stretchcluster.yaml for the math.
   storage:
     persistentVolume:
       enabled: true
-      size: 200Gi
+      size: 500Gi

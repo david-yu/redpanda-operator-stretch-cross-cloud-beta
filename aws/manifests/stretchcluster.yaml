@@ -131,13 +131,18 @@ spec:
       # load — drift caught during 2026-05-03 e2e validation. Production
       # demos with longer-running workloads should raise this.
       log_retention_ms: 3600000
-  # 200Gi per-broker PVC. The operator chart's default of 20Gi fills in
+  # 500Gi per-broker PVC. The operator chart's default of 20Gi fills in
   # ~11 minutes under the OMB 30 MB/s × RF=5 demo workload, which stalls
-  # the partition autobalancer (`Over Disk Limit Nodes` for every broker)
-  # and prevents leadership from rebalancing back to the AWS rack after
-  # a Demo A failover/recovery cycle. 200Gi sized for a multi-hour demo
-  # in combination with the 1-hour retention above.
+  # the partition autobalancer (`Over Disk Limit Nodes` for every broker).
+  # Originally bumped to 200Gi for Demo A's failover/recovery cycle (drift
+  # caught 2026-05-03), then bumped to 500Gi after Demo B's capacity-
+  # injection step still hit `Over Disk Limit` (drift caught 2026-05-04):
+  # the new GCP broker has to receive ~108GB of historical replica data
+  # within the 1-hour retention window while the existing brokers keep
+  # serving steady-state writes, and 200Gi at the 80% autobalancer
+  # threshold (160GB usable) didn't leave enough headroom. 500Gi sized
+  # for a multi-hour Demo B run with sustained 30 MB/s OMB load.
   storage:
     persistentVolume:
       enabled: true
-      size: 200Gi
+      size: 500Gi
