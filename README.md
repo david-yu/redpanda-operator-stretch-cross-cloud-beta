@@ -25,6 +25,7 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
   - [8. Validate](#8-validate)
   - [9. Demo add-ons: Console, OMB load, Prometheus + Grafana](#9-demo-add-ons-console-omb-load-prometheus--grafana)
 - [Demo A: leader pinning + cross-cloud failover fallthrough](#demo-a-leader-pinning--cross-cloud-failover-fallthrough)
+- [Demo B: regional failure + capacity injection (cross-cloud variant)](#demo-b-regional-failure--capacity-injection-cross-cloud-variant)
 - [Cost](#cost)
 - [Tear down](#tear-down)
 - [Troubleshooting](#troubleshooting)
@@ -600,6 +601,149 @@ Console / Grafana show the leader-count panel flip back to `aws=12, gcp=0, azure
 - **Within-rack leader split lands at 4/8 not 6/6 after AWS recovery.** The `ordered_racks` rack-priority semantics work (12 leaders return to AWS), but the leader balancer doesn't always even out across the two AWS-rack brokers. `rpk cluster partitions transfer-leadership <topic> --partition <pid>:<broker>` works to nudge specific partitions, but the balancer may move them back. Not a blocker — the rack-pin objective is met. Filing a follow-up issue makes sense if intra-rack evenness becomes a hard requirement.
 - **GKE kubectl-exec sessions get reset by the API server LB on commands lasting >60 s.** During Demo A I hit `connection reset by peer` on long `rpk` queries against rp-gcp brokers. Workaround: anchor long-running queries on rp-aws or rp-azure (the EKS / AKS API servers don't have the same idle-LB behavior).
 - **Don't run OMB at 30 MB/s for hours without 200Gi PVCs + 1h retention.** All five brokers will hit `no space left on device` and crashloop simultaneously. Recovery requires online PVC expansion (`kubectl patch pvc datadir-... -p '{"spec":{"resources":{"requests":{"storage":"200Gi"}}}}'`) on every broker + force-delete the crashlooping pods to trigger the FS resize on remount. `<cloud>/manifests/stretchcluster.yaml` is now sized for this; only an issue if you bring up the cluster from a pre-2026-05-03 snapshot.
+
+## Demo B: regional failure + capacity injection (cross-cloud variant)
+
+> Adapted from the same-cloud beta's [Demo B: regional failure + temporary failover-region capacity injection](https://github.com/david-yu/redpanda-operator-stretch-beta#demo-b-regional-failure--temporary-failover-region-capacity-injection). The narrative is the same — `RF=5` with only 3 of 5 brokers reachable can't self-heal, the partition autobalancer stalls with `Over Disk Limit`/`unavailable_nodes` violations, and you fix it by **adding a 5th-broker-equivalent of capacity** so re-replication can complete.
+>
+> **The same-cloud beta does capacity injection by spinning up a 4th K8s cluster** (`<cloud>/terraform-failover/`) in a separate region. That path doesn't trivially port to cross-cloud — see [Why a 4th K8s cluster is hard cross-cloud](#why-a-4th-k8s-cluster-is-hard-cross-cloud) below — so the cross-cloud variant uses **NodePool scale-up on an existing cluster** instead. The lesson the demo teaches (RF=5 stall → capacity injection → rebalance → drain) is identical; only the capacity-injection mechanism differs.
+
+### Why a 4th K8s cluster is hard cross-cloud
+
+Same-cloud Demo B's 4th K8s cluster sits inside the same cloud's L3 mesh (TGW / global VPC / VNet peering). Cross-cloud, every layer needs an extension:
+
+1. **IPsec VPN mesh becomes 4-endpoint.** A 4th cluster needs 6 new IPsec tunnels (failover↔aws, failover↔gcp, failover↔azure, both directions per peering rules) on top of the existing 6. Each cloud's VPN gateway has a per-connection cost (AWS $0.05/hr, Azure $0.04/hr per VPN connection) — Demo B alone adds ~$0.30/hr in VPN connection fees.
+2. **Cilium ClusterMesh becomes 4-cluster (6 pairs).** Each pair needs `cilium clustermesh connect --allow-mismatching-ca`. The clustermesh-apiserver's TLS server-cert workaround ([cilium#43099](https://github.com/cilium/cilium/issues/43099)) has to apply to the 4th cluster too. The KVStoreMesh sync has more peers, so the post-connect settle window grows from \~60s to \~2-3 min.
+3. **Operator multicluster bootstrap becomes 4-peer.** `rpk k8s multicluster bootstrap` has to be re-run with all 4 contexts. The existing 3-cluster operator deployments may need their helm values' `multicluster.peers` block re-rendered + `helm upgrade` for them to pick up the new peer's LB hostname.
+4. **Adding the 4th cluster mid-failure is fragile.** The same-cloud beta's [AWS-only callout](https://github.com/david-yu/redpanda-operator-stretch-beta#demo-b-regional-failure--temporary-failover-region-capacity-injection) calls out two issues that all hit cross-cloud too:
+   - The new operator pod's startup needs every peer reachable; if rp-aws is cordoned and AWS LBC has reaped its multicluster-peer NLB, the failover operator hangs on `name resolver error: produced zero addresses` until you temporarily uncordon AWS to let the failover operator fetch peer kubeconfigs.
+   - Cross-cloud RTT — if any failover↔surviving-peer pair exceeds 100 ms, Redpanda's hardcoded `node_status_rpc` timeout silently corrupts the cluster's `unavailable_nodes` view. The us-east-1 / us-east1 / eastus triple chosen for this scaffold stays under 100 ms pairwise; a 4th region in the same continent (e.g. AWS us-west-2) keeps that property if the controller stays in the eastern triple, but the controller can re-elect into the failover region and skew the timing budget.
+
+If you want the faithful 4th-K8s-cluster path, the work is roughly:
+- New `aws-failover/terraform/` (or gcp / azure) with EKS in a 2nd region, public subnets, no VPC CNI, EBS CSI driver + default `ebs-sc` SC, mirroring `aws/terraform/`
+- New `vpn/terraform/aws-failover.tf` (or similar) for 4 new IPsec tunnels (2 to gcp, 2 to azure) plus VPC peering to rp-aws (intra-AWS, $0.02/GB regional egress, much cheaper than IPsec)
+- Extend `scripts/{install-cilium,connect-mesh,bootstrap-redpanda,teardown}.sh` to handle a 4th context
+- New `aws-failover/manifests/{stretchcluster,nodepool}.yaml` with `rack: aws-failover` and NodePool replicas=2
+
+### Cross-cloud Demo B walkthrough (NodePool scale-up variant)
+
+Pre-reqs: full bring-up + Demo A done (so we know the 5-broker baseline works), OMB Jobs running for visible load.
+
+The committed manifests have:
+
+```yaml
+config:
+  cluster:
+    partition_autobalancing_node_availability_timeout_sec: 600   # 10 min
+    partition_autobalancing_node_autodecommission_timeout_sec: 900  # 15 min
+```
+
+These keep the demo runnable in a single sitting (autodecom kicks in 15 min after the cordon, well before the demo timer wins).
+
+**Step 1 — simulate AWS regional failure (same as Demo A step 3)**
+
+```bash
+for N in $(kubectl --context rp-aws get nodes -o name); do
+  kubectl --context rp-aws cordon "$N"
+done
+kubectl --context rp-aws -n redpanda delete pod \
+  redpanda-rp-aws-0 redpanda-rp-aws-1 --grace-period=10
+```
+
+**Step 2 — observe the partition autobalancer stall**
+
+After ~10 min (`node_availability_timeout`), check from a surviving cluster:
+
+```bash
+kubectl --context rp-azure -n redpanda exec redpanda-rp-azure-0 -c redpanda -- \
+  rpk cluster partitions balancer-status
+```
+
+```
+BALANCER STATUS
+===============
+Status:                      stalled
+Unavailable Nodes:           [0, 1]      ← AWS brokers
+Over Disk Limit Nodes:       []
+Current Reassignment Count:  0
+```
+
+`Status: stalled` + `unavailable_nodes: [0, 1]` is the failure mode the demo is *demonstrating*. Under-replicated partitions show up too:
+
+```bash
+kubectl --context rp-azure -n redpanda exec redpanda-rp-azure-0 -c redpanda -- rpk cluster health
+# Healthy: false
+# Under-replicated partitions: <every RF=5 topic>
+```
+
+> **Cross-cloud caveat applies here too.** If the controller raft re-elected into a broker whose pairwise RTT to another surviving broker exceeds 100 ms, `unavailable_nodes` will report the *wrong* set (e.g., a healthy peer whose heartbeat fell into the timeout black hole). The us-east-1 / us-east1 / eastus triple stays under 100 ms; if you swap any region for a far one (e.g. eu-west-1), this matters. Same gotcha as Demo A's "Cross-cloud heartbeat caveat".
+
+**Step 3 — inject capacity by scaling up the rp-gcp NodePool**
+
+Same-cloud Demo B step 3 brings up a whole new K8s cluster here. The cross-cloud variant scales an existing NodePool — same outcome (5 reachable brokers), much less plumbing:
+
+```bash
+kubectl --context rp-gcp -n redpanda patch nodepool rp-gcp \
+  --type=merge -p '{"spec":{"replicas": 4}}'
+```
+
+The operator reconciles → 2 new broker pods schedule on rp-gcp → broker IDs 5 + 6 join the cluster. Watch them come up:
+
+```bash
+kubectl --context rp-gcp -n redpanda get pods -l app.kubernetes.io/name=redpanda -w
+```
+
+**Step 4 — autobalancer un-stalls and rehomes the AWS brokers' replicas**
+
+Once the new brokers are `IS-ALIVE=true` (~3-5 min), the autobalancer transitions from `stalled` to `in_progress`:
+
+```bash
+kubectl --context rp-azure -n redpanda exec redpanda-rp-azure-0 -c redpanda -- \
+  rpk cluster partitions balancer-status
+```
+
+```
+Status:                      in_progress
+Unavailable Nodes:           [0, 1]
+Current Reassignment Count:  18
+```
+
+After `node_autodecommission_timeout` (15 min from the cordon, ~5-10 min from the GCP scale-up), the AWS brokers (0, 1) are auto-decommissioned. `rpk cluster health` settles to `Healthy: true` with the new layout: 4 GCP + 1 Azure brokers, RF=5 (max RF the 5 surviving brokers can carry, which matches the original RF=5 — convenient).
+
+**Step 5 — restore AWS (uncordon)**
+
+```bash
+for N in $(kubectl --context rp-aws get nodes -o name); do
+  kubectl --context rp-aws uncordon "$N"
+done
+```
+
+The AWS broker pods schedule back; **but they were auto-decommissioned in step 4, so they re-join as new broker IDs (7, 8) rather than re-claiming 0 + 1**. The cluster now has 7 brokers in state and 7 in the broker list. That's the expected end-state of a same-cloud Demo B run too.
+
+**Step 6 — drain the temporary GCP capacity**
+
+Same-cloud Demo B decommissions the 4th cluster's brokers here. The cross-cloud variant scales the rp-gcp NodePool back down:
+
+```bash
+kubectl --context rp-gcp -n redpanda patch nodepool rp-gcp \
+  --type=merge -p '{"spec":{"replicas": 2}}'
+```
+
+The operator decommissions the two scale-up brokers (5, 6) gracefully, replicas migrate to the AWS brokers (7, 8), and the cluster returns to the original 2/2/1 layout (just with different broker IDs).
+
+### Known issues for cross-cloud Demo B (validated 2026-05-03)
+
+Inherited from same-cloud Demo B and confirmed cross-cloud:
+
+- **`partition_balancer/status` reports the wrong `unavailable_nodes` set when the controller leader sits >100 ms from any surviving broker.** Mitigation: keep the regions in the same continent (the default `us-east-1` / `us-east1` / `eastus` triple is fine).
+- **Under-replicated topics show in *every* topic's describe**, including internal ones (`__consumer_offsets`, transaction state). That's expected — RF=5 internal topics are also affected.
+- **Auto-decommission only fires on brokers that have been continuously unreachable for `autodecom_timeout`.** Patching the NodePool replicas back up before the timeout fires means the original brokers (0, 1) come back instead of being decommissioned, which leaves you with 7 active brokers and no auto-cleanup. Time the demo accordingly.
+
+Cross-cloud-specific:
+
+- **NodePool scale-up takes longer cross-cloud than same-cloud** because the new pods have to fetch operator-managed mTLS material from a peer cluster's API server over the IPsec VPN before joining the multicluster. Budget ~5-7 min from the patch to "broker `IS-ALIVE=true`" instead of the same-cloud beta's 3-5 min.
+- **AWS LBC reap risk on long cordons.** Same gotcha as Demo A — but Demo B's cordon is 15+ min, well past the LBC's reap timer. If `rp-aws-multicluster-peer` NLB gets reaped, the rp-gcp / rp-azure operator pods log `failed to fetch peer kubeconfig from rp-aws ...` and stay in that state until you uncordon AWS (LBC pods come back, recreate the LB, peer connectivity restores). Workaround: temporarily uncordon AWS for ~2 min between Demo B's steps 3 and 4 to let LBC re-establish the LB if it was reaped, then re-cordon to continue the demo. Less invasive than the same-cloud beta's analogous workaround because we're not provisioning a new operator.
+- **OMB workload disk pressure compounds the demo.** Demo B's 15-min cordon + GCP scale-up adds significant cross-cloud egress (replica catch-up to the new brokers traverses the VPN). At 30 MB/s baseline the catch-up phase pushes 60–90 MB/s of cross-cloud traffic for a few minutes — budget another \~$2-5 in egress on top of the steady-state \~$29/hr.
 
 ## Cost
 
