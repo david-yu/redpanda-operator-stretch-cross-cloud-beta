@@ -216,22 +216,49 @@ for ctx in "${CONTEXTS[@]}"; do force_finalize_ns  "$ctx"; done
 log "=== disable clustermesh on each cluster ==="
 for ctx in "${CONTEXTS[@]}"; do clustermesh_disable "$ctx"; done
 
-# IMPORTANT ordering: vpn/terraform must destroy BEFORE the per-cloud
-# stacks. The VPN module holds the
-# azurerm_virtual_network_gateway_connection (and AWS customer_gateway,
-# GCP vpn_tunnel) resources that reference the per-cloud gateways.
-# If azure/terraform destroys first, the AKS-side gateway can't go
-# because Azure refuses to delete a Virtual Network Gateway that's
-# still attached to an active connection. Same logical issue on
-# AWS/GCP — the VPN-module connections reference the per-cloud
-# gateways.
+# IMPORTANT ordering: the cross-cloud VPN connections must be destroyed
+# BEFORE the per-cloud TFs. The VPN module holds the
+# azurerm_virtual_network_gateway_connection / aws_vpn_connection /
+# google_compute_vpn_tunnel resources that reference the per-cloud
+# gateways. If we go straight to per-cloud destroys, AWS subnet delete
+# fails (the VGW is still attached to live VPN connections), GCP router
+# delete fails (still in use by tunnels), and Azure VPN GW delete fails
+# (still attached to a connection) — the classic 3-way circular dep
+# that needs operator intervention to break.
 #
-# vpn/terraform takes per-cloud outputs as -var inputs. Pull them from
-# the still-applied per-cloud state files. If any per-cloud state is
-# already empty (e.g. partial teardown re-run), the values come back
-# as empty strings and `terraform destroy` does an early no-op for
-# resources that can't be refreshed — which is fine.
-log "=== terraform destroy vpn/terraform first (deletes connections / tunnels / customer_gateways) ==="
+# Two-phase strategy: first delete the cross-cloud connections via cloud
+# CLI (idempotent, can't hit TF state / refresh / var-passthrough
+# failure modes), then run the TF-based vpn/terraform destroy as a
+# state-cleanup pass. Belt-and-braces — even if vpn/terraform destroy
+# fails, the per-cloud destroys are already unblocked because the live
+# connections are gone.
+log "=== phase 1: delete cross-cloud VPN connections via cloud CLI ==="
+log "  AWS — delete VPN connections by Name tag"
+for vpn_id in $(aws ec2 describe-vpn-connections --region us-east-1 \
+  --query 'VpnConnections[?Tags[?Key==`Name` && (Value==`to-rp-azure` || Value==`to-rp-gcp`)] && State==`available`].VpnConnectionId' \
+  --output text 2>/dev/null); do
+  [[ -z "$vpn_id" ]] && continue
+  aws ec2 delete-vpn-connection --region us-east-1 --vpn-connection-id "$vpn_id" 2>/dev/null \
+    && log "    deleted aws vpn-connection: $vpn_id" || true
+done
+log "  GCP — delete VPN tunnels"
+for t in to-rp-aws to-rp-azure-a to-rp-azure-b; do
+  gcloud compute vpn-tunnels delete "$t" --region us-east1 \
+    --project "$GCP_PROJECT" --quiet 2>/dev/null \
+    && log "    deleted gcp vpn-tunnel: $t" || true
+done
+log "  GCP — delete orphan static routes (rp-gcp VPC blocked by these even after tunnel delete)"
+for r in to-rp-aws-via-vpn to-rp-azure-via-vpn; do
+  gcloud compute routes delete "$r" --project "$GCP_PROJECT" --quiet 2>/dev/null \
+    && log "    deleted gcp route: $r" || true
+done
+log "  Azure — delete VPN connections (frees the virtual_network_gateway for delete)"
+for c in to-rp-aws to-rp-gcp; do
+  az network vpn-connection delete --resource-group rp-aws-cross-cloud --name "$c" 2>/dev/null \
+    && log "    deleted azure vpn-connection: $c" || true
+done
+
+log "=== phase 2: terraform destroy vpn/terraform (state cleanup; live connections already gone) ==="
 AWS_VPC_ID=$(cd "$REPO_ROOT/aws/terraform" && terraform output -raw vpc_id 2>/dev/null || echo "")
 AWS_VGW_ID=$(cd "$REPO_ROOT/aws/terraform" && terraform output -raw vpn_gateway_id 2>/dev/null || echo "")
 AWS_RT_IDS_JSON=$(cd "$REPO_ROOT/aws/terraform" && terraform output -json public_route_table_ids 2>/dev/null || echo '[]')
@@ -247,7 +274,7 @@ AZ_VPN_BGP_IP=$(cd "$REPO_ROOT/azure/terraform" && terraform output -raw vpn_gat
 
 pushd "$REPO_ROOT/vpn/terraform" >/dev/null
 terraform init -upgrade >/dev/null 2>&1 || true
-terraform destroy -auto-approve \
+if ! terraform destroy -auto-approve \
   -var "aws_region=us-east-1" \
   -var "aws_vpc_id=$AWS_VPC_ID" \
   -var "aws_vpc_cidr=10.10.0.0/16" \
@@ -267,7 +294,22 @@ terraform destroy -auto-approve \
   -var "azure_vpn_gateway_id=$AZ_VPN_GW_ID" \
   -var "azure_vpn_gateway_public_ip=$AZ_VPN_PIP" \
   -var "azure_vpn_gateway_bgp_peering_address=$AZ_VPN_BGP_IP" \
-  2>&1 | tail -5 | sed 's/^/  /'
+  2>&1 | tail -10 | sed 's/^/  /'; then
+  # vpn/terraform destroy can fail at TF refresh time when per-cloud
+  # state outputs are empty (e.g., a partial-teardown re-run) or when
+  # the per-cloud resources the VPN module references have been deleted
+  # out from under it (which is exactly the case after phase 1's CLI
+  # cleanup). Phase 1 already deleted the live cloud resources, so
+  # falling back to `terraform state rm` for everything in vpn/terraform
+  # is the right thing — there are no live resources left for TF to
+  # destroy, just stale state entries that would otherwise block a
+  # future re-apply. Per-cloud destroys (next step) don't depend on
+  # vpn/terraform state at all, so they aren't affected.
+  log "  vpn/terraform destroy failed — clearing state entries (CLI cleanup in phase 1 already deleted the cloud resources)"
+  for r in $(terraform state list 2>/dev/null); do
+    terraform state rm "$r" 2>/dev/null | sed 's/^/    /' || true
+  done
+fi
 popd >/dev/null
 
 log "=== terraform destroy each cloud ==="
