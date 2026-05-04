@@ -83,11 +83,11 @@ enable_all() {
 # 3-clique: aws↔gcp, aws↔azure, gcp↔azure.
 connect_all() {
   log "connecting rp-aws ↔ rp-gcp"
-  cilium clustermesh connect --allow-mismatching-ca --context rp-aws --destination-context rp-gcp
+  cilium clustermesh connect --context rp-aws --destination-context rp-gcp
   log "connecting rp-aws ↔ rp-azure"
-  cilium clustermesh connect --allow-mismatching-ca --context rp-aws --destination-context rp-azure
+  cilium clustermesh connect --context rp-aws --destination-context rp-azure
   log "connecting rp-gcp ↔ rp-azure"
-  cilium clustermesh connect --allow-mismatching-ca --context rp-gcp --destination-context rp-azure
+  cilium clustermesh connect --context rp-gcp --destination-context rp-azure
 }
 
 status_all() {
