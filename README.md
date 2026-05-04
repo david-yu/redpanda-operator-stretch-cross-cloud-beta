@@ -32,37 +32,18 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
 - [Caveats / known issues](#caveats--known-issues)
 
 > [!IMPORTANT]
-> **Current validation state (2026-05-03)** — full end-to-end validated, including Demo A leader-pinning fallthrough across a cordon-and-restore cycle. Supersedes the 2026-05-01 baseline.
+> **Known unresolved upstream issues** that this scaffold works around — read these before you tweak any of the design choices below, and check the linked tickets before assuming "the fix is upstream now":
 >
-> | Layer | State |
-> |---|---|
-> | Per-cloud Terraform (EKS / GKE / AKS) | ✅ Apply clean |
-> | Cross-cloud IPsec VPN mesh | ✅ Established (switched to **static routes** — BGP convergence is fragile across these clouds, see `vpn/terraform/`) |
-> | Cilium ClusterMesh (control plane + KVStoreMesh) | ✅ All 3 clusters fully connected |
-> | Intra-cluster pod-to-pod networking | ✅ (after AWS node-SG self-rule fix in `aws/terraform/eks.tf`) |
-> | EBS CSI driver + PVC binding on AWS | ✅ |
-> | cert-manager webhook on EKS | ✅ (after `hostNetwork: true` + `securePort=10260` patch — see Step 6) |
-> | Multi-cluster operator + raft mesh (`rpk k8s multicluster status`) | ✅ |
-> | StretchCluster + NodePool CRs applied, broker pods Running | ✅ |
-> | All 5 brokers in cluster, controller leader on rp-aws | ✅ `rpk cluster health` reports `Healthy: true`, 5 nodes, 0 leaderless partitions |
-> | Cross-cloud produce / consume (`cross-cloud-test` topic, partitions=5, replicas=5) | ✅ produce on AWS → consume on GCP, produce on Azure → consume on AWS |
-> | Demo add-ons (Console + ~30 MB/s OMB + kube-prometheus-stack) — see [Step 9](#9-demo-add-ons-console-omb-load-prometheus--grafana) | ✅ Validated 2026-05-03 — Console (helm chart, see K8S-846 for why not the CR), Grafana w/ auto-provisioned Redpanda-Default-Dashboard, OMB sustaining 30.01 MB/s |
-> | Demo A — leader pinning + cross-cloud fallthrough (cordon → relocate → restore) | ✅ Validated 2026-05-03 — leaders pin to AWS, fall through to GCP under outage, return to AWS on restore. Convergence ~5–7 min under 30 MB/s sustained load (longer than the README's earlier "~2 min" claim). Within-rack split lands at 4/8 not 6/6 — not investigated, doesn't break the rack-priority semantics |
-> | EKS aws-ebs-csi-driver addon + AmazonEBSCSIDriverPolicy | ✅ Now in `aws/terraform/eks.tf`. Without it, broker PVCs sit Pending forever — gotcha #11 from the 2026-05-01 pass, codified into the TF on 2026-05-03 |
-> | Default StorageClass on EKS (CSI-backed) | ✅ Wired into `aws/terraform/eks.tf` as a `kubernetes_storage_class_v1` (`ebs-sc`, marked default, `ebs.csi.aws.com` provisioner, gp3+encrypted). Depends on the EKS module so the addon's controller is up before the SC binds |
-> | Broker data PVC sizing for OMB workload | ✅ Pinned to 200Gi via `spec.storage.persistentVolume.size` in each `<cloud>/manifests/stretchcluster.yaml`. Chart default of 20Gi fills in ~11 min under 30 MB/s × RF=5 — caught when all 5 brokers crashlooped on `no space left on device` mid-Demo-A |
-> | `log_retention_ms = 3600000` (1h) | ✅ Set in each `<cloud>/manifests/stretchcluster.yaml` cluster config. Required to keep disk pressure bounded under sustained OMB load even with 200Gi PVCs |
+> - **[cilium#24403](https://github.com/cilium/cilium/issues/24403)** — Cilium picks node `InternalIP` for clustermesh tunnel endpoints; cross-cloud nodes aren't reachable on those IPs without a routable underlay. The IPsec VPN tier in `vpn/terraform/` makes peer InternalIPs mutually routable, sidestepping the bug.
+> - **[cilium#31209](https://github.com/cilium/cilium/issues/31209)** — Tunnel + KubeProxyReplacement + WireGuard nodeEncryption combo breaks asymmetric initial-connect routing. We deliberately do **not** enable Cilium's WireGuard nodeEncryption; the IPsec underlay already encrypts cross-cloud traffic.
+> - **[cilium#43099](https://github.com/cilium/cilium/issues/43099)** — clustermesh-apiserver server cert is shipped with `serverAuth` only, but KVStoreMesh authenticates as a TLS client and fails with `unknown certificate authority`. **Fixed upstream in [cilium#43230](https://github.com/cilium/cilium/pull/43230)** (merged Dec 2025, in 1.20.0-pre.1); once 1.20.0 GA ships we can pin to it and delete `patch_server_cert_clientauth()` from `connect-mesh.sh`.
+> - **[redpanda-data/redpanda-operator#1499](https://github.com/redpanda-data/redpanda-operator/issues/1499)** — operator's auto-generated cert SANs (`*.redpanda`, `*.redpanda.svc`) violate RFC-6125 for single-label parents and strict TLS hostname verification rejects them on the advertised broker RPC hostname (`redpanda-rp-gcp-0.redpanda` etc.). Brokers complete the TLS handshake then drop the RPC with `rpc::errc:4` / "Broken pipe". This scaffold ships `spec.tls.enabled: false` on every listener as the workaround; cross-cloud confidentiality is already provided by the IPsec VPN underlay (see [Architecture → How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted)).
+> - **[K8S-846](https://redpandadata.atlassian.net/browse/K8S-846)** (internal) — operator binary started in `multicluster` mode ships the Console CRD but not its reconciler; Console CRs sit with empty `status` indefinitely. We use the `redpanda/console` Helm chart instead — see Step 9 + [`console/values.yaml`](console/values.yaml).
+> - **Redpanda `node_status_rpc` 100ms timeout** — hardcoded in the broker; if the controller leader ever lands in a region whose pairwise RTT to any peer exceeds 100ms, that peer is silently marked `IS-ALIVE=false` and the autobalancer makes decisions on the wrong data. Mitigation here: the `us-east-1` / `us-east1` / `eastus` triple stays under 100ms pairwise. See the cross-Atlantic caveat under Demo A and Step 7.
 >
-> **TLS at the broker layer is intentionally `enabled: false`** — filed upstream as [redpanda-data/redpanda-operator#1499](https://github.com/redpanda-data/redpanda-operator/issues/1499). Short version: the operator's auto-generated cert SANs (`*.redpanda`, `*.redpanda.svc`) violate RFC-6125 for single-label parents and OpenSSL fails hostname verification on the advertised broker hostname (`redpanda-rp-gcp-0.redpanda` etc.); brokers complete the TLS handshake then drop the RPC with `rpc::errc:4` / "Broken pipe". The cross-cloud hop is already IPsec-encrypted by the VPN tunnels (see [Architecture → How cross-cloud traffic is encrypted](#how-cross-cloud-traffic-is-encrypted)), so `tls.enabled: false` is encryption-equivalent for that hop. Re-enabling broker TLS cleanly across clusters needs the operator change proposed in #1499 (emit explicit per-broker SANs, or skip hostname verification on cross-cluster RPC clients).
+> **`spec.tls.enabled: false` on its own is not enough** — the operator chart still emits `kafka_api_tls` / `admin_api_tls` / `pandaproxy_api_tls` / `schema_registry_api_tls` listeners referencing `/etc/tls/certs/external/*` cert files that don't exist, and brokers crash-loop reading them. The manifests in this repo ship with TLS turned off explicitly on every listener (`spec.listeners.{kafka,admin,http,schemaRegistry,rpc}.tls.enabled: false`). If you re-enable broker TLS once #1499 is fixed, remove that listener block in addition to flipping `spec.tls.enabled: true`.
 >
-> **Note**: `spec.tls.enabled: false` on its own is **not** enough — the operator chart still emits `kafka_api_tls` / `admin_api_tls` / `pandaproxy_api_tls` / `schema_registry_api_tls` listeners pointing at `/etc/tls/certs/external/*` cert files that don't exist, and brokers crash-loop reading them. The manifests in this repo ship with TLS turned off explicitly on every listener (`spec.listeners.{kafka,admin,http,schemaRegistry,rpc}.tls.enabled: false`). If you re-enable broker TLS later, remove that listener block in addition to flipping `spec.tls.enabled: true`.
->
-> **Why the VPN tier exists** — without it, the stack hits two open upstream Cilium issues that prevent cross-cloud clustermesh data plane from establishing:
->
-> - **[cilium#24403](https://github.com/cilium/cilium/issues/24403)** — Cilium picks node `InternalIP` for clustermesh tunnel endpoints, but cross-cloud nodes are only reachable via `ExternalIP` without a VPN. AWS pods try to send traffic to GCP nodes' private `10.20.x.x`, which doesn't route across the WAN.
-> - **[cilium#31209](https://github.com/cilium/cilium/issues/31209)** — Tunnel + KubeProxyReplacement + WireGuard nodeEncryption combination causes asymmetric initial-connect routing.
->
-> The VPN tier sidesteps both: InternalIPs become mutually routable across clouds (fixes #24403), and we drop WireGuard nodeEncryption since IPsec already encrypts the underlay (fixes #31209). The original BGP-routed VPN scaffold didn't converge cleanly; we switched to **static routes** (per [this devgenius.io guide](https://blog.devgenius.io/lessons-from-connecting-gcp-and-aws-with-a-site-to-site-vpn-d5e0d27ec03c)) and that works.
+> **VPN tier note** — the original BGP-routed VPN scaffold didn't converge cleanly across the AWS/GCP/Azure triple; we switched to **static routes** (per [this devgenius.io guide](https://blog.devgenius.io/lessons-from-connecting-gcp-and-aws-with-a-site-to-site-vpn-d5e0d27ec03c)) and that works. See `vpn/terraform/`.
 
 ## How it differs from the same-cloud beta
 
