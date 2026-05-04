@@ -5,7 +5,7 @@ Validation scaffold for a Redpanda Operator v26.2.1+ StretchCluster that **spans
 Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (single-cloud, three-region). Where the same-cloud beta uses the cloud's native L3 mesh (AWS TGW, GCP global VPC, Azure VNet peering), this repo uses **a 3-way mesh of site-to-site IPsec VPNs (BGP-routed) + Cilium ClusterMesh on top**, so node InternalIPs are routable across cloud boundaries and Cilium's clustermesh data plane works without modification.
 
 > [!TIP]
-> **If you don't specifically need cross-cloud, prefer [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (cross-region in a single cloud).** Cross-cloud egress is billed at each provider's *internet-egress* rate ($0.087–$0.12/GB), while same-cloud cross-region egress is \~$0.02/GB — a **4–6× egress saving** at idle and even more under load. For the 30 MB/s OMB demo workload, that's roughly **\~$29/hr** of egress in this cross-cloud scaffold versus **\~$5–$7/hr** in the same-cloud beta. Use this repo only when the demo *itself* is cross-cloud (e.g., a 3-cloud failover story); use the same-cloud beta for everything else, including most leader-pinning / autobalancer / multicluster-operator validation. See the [Cost](#cost) section for the breakdown.
+> **If you don't specifically need cross-cloud, prefer [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) (cross-region in a single cloud).** Cross-cloud egress is billed at each provider's *internet-egress* rate ($0.087–$0.12/GB), while same-cloud cross-region transfer is $0.02–$0.04/GB depending on cloud (per the same-cloud beta's [cross-region data transfer table](https://github.com/david-yu/redpanda-operator-stretch-beta#cross-region-data-transfer-variable-per-gb--the-cost-that-scales-with-throughput) — AWS adds TGW data-processing on top of egress, Azure pays both directions on peering, GCP is one-side egress only). For the 30 MB/s OMB demo workload, that's roughly **\~$29/hr of egress in this cross-cloud scaffold** versus **\~$4.30/hr (GCP) / \~$8.60/hr (AWS or Azure) in the same-cloud beta** — a 3.4–6.7× saving depending on cloud. Use this repo only when the demo *itself* is cross-cloud (e.g., a 3-cloud failover story); use the same-cloud beta for everything else, including most leader-pinning / autobalancer / multicluster-operator validation. See the [Cost](#cost) section for the breakdown.
 
 ## Contents
 
@@ -667,16 +667,18 @@ A Demo A run that takes \~3-4 hours of bring-up + walkthrough + teardown lands a
 
 ### Same-cloud cross-region is dramatically cheaper
 
-If your demo / validation doesn't *specifically* require cross-cloud, use [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) instead. It runs a StretchCluster across three regions of a single cloud, which keeps egress on each provider's much-cheaper inter-region rate:
+If your demo / validation doesn't *specifically* require cross-cloud, use [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redpanda-operator-stretch-beta) instead. It runs a StretchCluster across three regions of a single cloud, which keeps egress on each provider's much-cheaper inter-region rate. Numbers below are pulled directly from that repo's [cross-region data transfer table](https://github.com/david-yu/redpanda-operator-stretch-beta#cross-region-data-transfer-variable-per-gb--the-cost-that-scales-with-throughput), which has the per-cloud breakdown including both-direction billing (AWS TGW data-processing, Azure peering ingress+egress) — so these are not just the egress headline rate:
 
-| Egress path | Rate (rough) | 30 MB/s OMB cost (\~324 GB/hr cross-region) |
+| Egress path | Effective rate | 30 MB/s OMB cost (\~324 GB/hr cross-region) |
 |---|---|---|
-| AWS inter-region (us-east-1 ↔ us-west-2) | \~$0.02/GB | \~$6.50/hr |
-| GCP inter-region (us-east1 ↔ us-west1) | \~$0.02/GB | \~$6.50/hr |
-| Azure inter-region (eastus ↔ westus2) | \~$0.02/GB | \~$6.50/hr |
+| AWS inter-region (us-east-1 ↔ us-west-2 via TGW) | $0.04/GB ($0.02 egress + $0.02 TGW) | **\~$8.60/hr** |
+| GCP inter-region (us-east1 ↔ us-west1) | $0.02/GB (one-side egress) | **\~$4.30/hr** |
+| Azure inter-region (eastus ↔ westus2 via peering) | $0.04/GB ($0.02 each direction) | **\~$8.60/hr** |
 | **Cross-cloud (this repo)** | $0.087–$0.12/GB | **\~$29/hr** |
 
-That's a **4–6× egress saving** at the same workload, plus you skip the IPsec VPN tier entirely (no `vpn/terraform/`, no static-route plumbing, simpler tear-down). Use the same-cloud beta for: leader-pinning / `ordered_racks` validation, autobalancer behavior, multicluster operator raft, broker TLS work (which the same-cloud beta can actually run with TLS on, since #1499's hostname-mismatch only bites cross-cluster), Console / OMB / Prometheus integration testing.
+That's a **3.4–6.7× egress saving** at the same workload (GCP best-case, AWS / Azure worst-case), plus you skip the IPsec VPN tier entirely (no `vpn/terraform/`, no static-route plumbing, simpler tear-down). The same-cloud beta also has a more thorough fixed-infra breakdown by cloud — Azure is cheapest fixed (\~$1.20/hr) thanks to the AKS Free tier, AWS is most expensive fixed (\~$2.50/hr) thanks to TGW attachment fees.
+
+Use the same-cloud beta for: leader-pinning / `ordered_racks` validation, autobalancer behavior, multicluster operator raft, broker TLS work (which the same-cloud beta can actually run with TLS on, since #1499's hostname-mismatch only bites cross-cluster), Console / OMB / Prometheus integration testing.
 
 Use **this** (cross-cloud) repo only for cross-cloud-specific stories: a 3-cloud failover demo, IPsec VPN tier validation, Cilium ClusterMesh on a cross-cloud underlay, or anything that explicitly needs the cluster to span provider boundaries.
 
