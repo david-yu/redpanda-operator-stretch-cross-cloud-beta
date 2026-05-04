@@ -146,18 +146,46 @@ aws_sweep() {
           && log "  deleted classic elb: $name" || true
       fi
     done
-    log "$r: sweep orphan NLBs"
+    # Sweep NLBs by ownership tag, NOT by name. Earlier versions of this
+    # sweep filtered on `k8s-redpanda*` / `k8s-clusterm*` / `k8s-rpaws*`
+    # name prefixes, but AWS LBC assigns LBs randomized UUID-style names
+    # like `abd25f37edff94e4581e8c4a933c0353` for Service objects whose
+    # name + namespace combo doesn't naturally fit the prefix scheme.
+    # Console / Grafana / any user-named LoadBalancer Service in this
+    # repo's demo addons fell into that bucket and leaked through the
+    # name-pattern filter, leaving `ela-attach` ENIs that blocked the
+    # subnet/VPC destroy for 13+ min. Tag-based selection catches all
+    # k8s-managed LBs unconditionally. Drift caught 2026-05-03.
+    log "$r: sweep orphan NLBs (by kubernetes.io/cluster/rp-aws tag)"
     for arn in $(aws elbv2 describe-load-balancers --region "$r" \
-      --query 'LoadBalancers[?contains(LoadBalancerName, `k8s-redpanda`) || contains(LoadBalancerName, `k8s-clusterm`) || contains(LoadBalancerName, `k8s-rpaws`)].LoadBalancerArn' \
-      --output text 2>/dev/null); do
-      aws elbv2 delete-load-balancer --region "$r" --load-balancer-arn "$arn" 2>/dev/null \
-        && log "  deleted nlb: $arn" || true
+      --query 'LoadBalancers[].LoadBalancerArn' --output text 2>/dev/null); do
+      [[ -z "$arn" ]] && continue
+      tagged=$(aws elbv2 describe-tags --region "$r" --resource-arns "$arn" \
+        --query 'TagDescriptions[0].Tags[?starts_with(Key, `kubernetes.io/cluster/`)] | length(@)' \
+        --output text 2>/dev/null || echo 0)
+      if [[ "$tagged" != "0" && "$tagged" != "" && "$tagged" != "None" ]]; then
+        aws elbv2 delete-load-balancer --region "$r" --load-balancer-arn "$arn" 2>/dev/null \
+          && log "  deleted nlb: $arn" || true
+      fi
     done
-    # After ELB delete, ENIs spend 5-10 min `in-use` (Status=detaching) before
-    # AWS releases them. If we go straight to SG / VPC delete those will all
-    # fail with DependencyViolation. Force-detach + force-delete the ELB-owned
-    # ENIs ourselves so the rest of the teardown isn't blocked on AWS' lazy
-    # cleanup.
+    # ela-attach ENIs (NLB-managed) refuse manual detach with
+    # `OperationNotPermitted: You are not allowed to manage 'ela-attach'
+    # attachments` — they only release when the owning NLB is fully
+    # deleted, which takes AWS 2-5 min after the delete-load-balancer
+    # call returns. Poll for ENI release before we continue, capped
+    # at 5 min so a stuck delete doesn't hang the whole teardown.
+    log "$r: wait up to 5min for NLB-managed (ela-attach) ENIs to release"
+    for _ in 1 2 3 4 5; do
+      remaining=$(aws ec2 describe-network-interfaces --region "$r" \
+        --query 'NetworkInterfaces[?Attachment.InstanceOwnerId==`amazon-elb` && contains(Description, `ELB`)].NetworkInterfaceId' \
+        --output text 2>/dev/null | wc -w)
+      [[ "$remaining" == "0" ]] && break
+      log "  $remaining ela-attach ENI(s) still in-use, waiting 60s..."
+      sleep 60
+    done
+
+    # After NLB delete + propagation, sweep any remaining ENIs (EKS
+    # control-plane, leftover instance-attached, etc.).
     log "$r: force-detach + delete ELB/EKS ENIs (don't wait 5-10min for AWS)"
     for eni in $(aws ec2 describe-network-interfaces --region "$r" \
       --query 'NetworkInterfaces[?contains(Description, `ELB`) || contains(Description, `EKS`)].NetworkInterfaceId' \
@@ -177,6 +205,20 @@ aws_sweep() {
       --query 'SecurityGroups[].GroupId' --output text 2>/dev/null); do
       aws ec2 delete-security-group --region "$r" --group-id "$sg" 2>/dev/null \
         && log "  deleted sg: $sg" || true
+    done
+    # AWS customer gateways live in aws/, but they're created by
+    # vpn/terraform's `aws_customer_gateway.{gcp,azure}` against the
+    # AWS provider. If vpn/ destroy fails (which the new phase-1 CLI
+    # cleanup handles for the *connections*, but not for customer
+    # gateways themselves), they stay around as $0 orphans. Sweep by
+    # the rp-{gcp,azure}-cgw Name tag the VPN module sets.
+    log "$r: sweep orphan customer gateways (rp-*-cgw tagged)"
+    for cgw in $(aws ec2 describe-customer-gateways --region "$r" \
+      --query 'CustomerGateways[?Tags[?Key==`Name` && (Value==`rp-gcp-cgw` || Value==`rp-azure-cgw`)] && State==`available`].CustomerGatewayId' \
+      --output text 2>/dev/null); do
+      [[ -z "$cgw" ]] && continue
+      aws ec2 delete-customer-gateway --region "$r" --customer-gateway-id "$cgw" 2>/dev/null \
+        && log "  deleted cgw: $cgw" || true
     done
   done
 }
