@@ -49,4 +49,28 @@ resource "azurerm_virtual_network_gateway" "this" {
   bgp_settings {
     asn = var.vpn_azure_asn
   }
+
+  # Cap the azurerm provider's poll loops on this resource. Without these
+  # explicit timeouts, the default is 90m for create / 90m for delete —
+  # but on real Azure the provider can sit polling for HOURS even after
+  # the gateway is fully provisioned / deleted server-side, because the
+  # `provisioningState` field doesn't always transition to a terminal
+  # state in the response. Caught during 2026-05-04 e2e v3 — bring-up
+  # spent 7+ hours in `Still creating...` after the GW was actually
+  # `Succeeded` on Azure's side; the workaround was kill TF + import +
+  # re-apply. Capping at 60m / 30m makes failures fast enough to
+  # recover from interactively.
+  #
+  # If create hits the 60m cap: kill TF, then
+  #   `terraform import azurerm_virtual_network_gateway.this <full-resource-id>`
+  # to bring the existing GW into state, then `terraform apply` to
+  # reconcile any remaining resources.
+  #
+  # If delete hits the 30m cap: scripts/teardown.sh's azure_sweep falls
+  # back to `az group delete --name <RG> --yes --no-wait` which cascades
+  # to all RG children including this gateway.
+  timeouts {
+    create = "60m"
+    delete = "30m"
+  }
 }

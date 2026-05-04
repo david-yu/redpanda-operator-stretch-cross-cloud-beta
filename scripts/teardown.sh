@@ -68,18 +68,17 @@ patch_finalizers() {
 
 helm_uninstall_all() {
   local ctx=$1
-  # Demo addons live on rp-aws only; safe to attempt on every context (no-op
-  # if the release doesn't exist). Doing this BEFORE the redpanda operator
-  # uninstall frees the LBs (Console NLB, Grafana NLB) so the AWS sweep at
-  # the end has fewer ENIs to chase, AND lets the operator reconcile the
-  # Console CR's deletion (Deployment + Service teardown) before its own
-  # uninstall.
-  kubectl --context "$ctx" -n redpanda delete -f "$REPO_ROOT/console/console.yaml" \
-    --ignore-not-found 2>/dev/null || true
+  # Demo addons (Console + monitoring) are now installed on EVERY cluster
+  # in the per-cloud design — uninstall on each context. Doing this BEFORE
+  # the redpanda-operator uninstall frees the LBs (each cloud's Console +
+  # Grafana) so the AWS sweep at the end has fewer ENIs to chase.
+  helm --kube-context "$ctx" uninstall console -n console 2>/dev/null || true
   helm --kube-context "$ctx" uninstall monitoring -n monitoring 2>/dev/null || true
+  kubectl --context "$ctx" delete namespace console monitoring --ignore-not-found 2>/dev/null || true
+  # OMB Jobs only run on rp-aws (only that cluster's namespace is the
+  # `redpanda` ns it cares about); idempotent on other contexts.
   kubectl --context "$ctx" -n redpanda delete -f "$REPO_ROOT/omb/producer-job.yaml" \
     -f "$REPO_ROOT/omb/consumer-job.yaml" --ignore-not-found 2>/dev/null || true
-  kubectl --context "$ctx" delete namespace monitoring --ignore-not-found 2>/dev/null || true
 
   helm --kube-context "$ctx" uninstall redpanda -n redpanda 2>/dev/null || true
   helm --kube-context "$ctx" uninstall "$ctx" -n redpanda 2>/dev/null || true
@@ -231,6 +230,31 @@ azure_sweep() {
         && log "  deleted lb: $rg/$lb" || true
     done
   done
+
+  # Fallback for the azurerm provider's virtual_network_gateway destroy
+  # poll-loop hang: it can sit in `Still destroying...` for 7+ hours even
+  # after Azure has finished deleting the gateway server-side, because
+  # the provider's status check fails to recognize completion (caught
+  # during 2026-05-04 e2e v3 bring-up AND teardown). When this happens,
+  # `terraform destroy` either times out or returns 0 with state still
+  # populated. We clean up by deleting the resource group directly via
+  # az CLI — the RG cascades to all child resources (VPN GW, VNet,
+  # Public IP, Local Network Gateways from vpn/terraform), and is the
+  # only Azure cleanup path that's reliably fast.
+  if [[ -d "$REPO_ROOT/azure/terraform" ]]; then
+    az_rg=$(cd "$REPO_ROOT/azure/terraform" 2>/dev/null && terraform output -raw resource_group 2>/dev/null || echo "")
+    [[ -z "$az_rg" ]] && az_rg="rp-aws-cross-cloud"
+    if az group show --name "$az_rg" --query name -o tsv >/dev/null 2>&1; then
+      log "Azure RG $az_rg still exists post terraform destroy — force-deleting via az CLI (cascades)"
+      az group delete --name "$az_rg" --yes --no-wait 2>/dev/null \
+        && log "  RG delete kicked off (--no-wait; cleanup continues server-side)" || true
+      pushd "$REPO_ROOT/azure/terraform" >/dev/null
+      for r in $(terraform state list 2>/dev/null); do
+        terraform state rm "$r" 2>/dev/null | sed 's/^/    /' || true
+      done
+      popd >/dev/null
+    fi
+  fi
 }
 
 clean_kubectl() {
