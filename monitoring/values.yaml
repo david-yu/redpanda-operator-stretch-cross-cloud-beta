@@ -63,7 +63,12 @@ grafana:
       service.beta.kubernetes.io/aws-load-balancer-type: nlb
       service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
       service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
-  defaultDashboardsEnabled: true
+  # We only want the Redpanda dashboards in this scaffold (Default + Ops,
+  # loaded via labelled ConfigMaps by install-monitoring.sh). Disabling
+  # the chart's ~20 bundled K8s dashboards (apiserver, nodes, pods,
+  # kubelet, prometheus, ...) keeps the Grafana UI focused on what the
+  # demo cares about.
+  defaultDashboardsEnabled: false
   # The dashboard sidecar picks up any ConfigMap with this label and
   # provisions it as a Grafana dashboard automatically. We label
   # monitoring/redpanda-dashboard-cm.yaml with grafana_dashboard=1 so the
