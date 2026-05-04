@@ -35,23 +35,28 @@ KPS_VERSION=${KPS_VERSION:-}
 
 # Redpanda Grafana dashboards from redpanda-data/observability (the same
 # source `rpk generate grafana-dashboard --dashboard <name>` pulls from
-# at runtime). We pre-load two:
+# at runtime). We pre-load three:
 #
-#   Ops dashboard      — broker KPI + health (throughput, latency, disk
-#                        free bytes, leadership distribution by rack,
-#                        URP, leader elections). 41 panels. Best for
-#                        Demo A's "watch leaders move" view AND Demo B's
-#                        disk-pressure view AND general broker health.
-#   Default dashboard  — broker-side throughput / consumer / topic
-#                        breakdown panels in a single legacy view.
+#   Ops dashboard           — broker KPI + health (throughput, latency,
+#                             disk free bytes, leadership distribution
+#                             by rack, URP, leader elections). 41 panels.
+#                             Best for Demo A's "watch leaders move"
+#                             view AND Demo B's disk-pressure view AND
+#                             general broker health.
+#   Default dashboard       — broker-side throughput / consumer / topic
+#                             breakdown panels in a single legacy view.
+#   Topic Metrics dashboard — per-topic produce/consume rates and on-disk
+#                             sizes. Filter to topic=load-test for live
+#                             OMB throughput observation.
 #
-# Both drop into the General folder via the sidecar (chart default at
-# /tmp/dashboards). Chart-bundled K8s dashboards (apiserver / nodes /
+# All three drop into the General folder via the sidecar (chart default
+# at /tmp/dashboards). Chart-bundled K8s dashboards (apiserver / nodes /
 # pods / kubelet / prometheus / ...) are explicitly disabled in
 # monitoring/values.yaml so the Grafana UI stays focused on Redpanda.
 DASHBOARD_URLS=(
   "https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/Redpanda-Ops-Dashboard.json|redpanda-ops-dashboard"
   "https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/Redpanda-Default-Dashboard.json|redpanda-default-dashboard"
+  "https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/Kafka-Topic-Metrics.json|redpanda-topic-metrics-dashboard"
 )
 
 log() { echo "[install-monitoring] $*" >&2; }
