@@ -33,12 +33,30 @@ NAMESPACE=${NAMESPACE:-monitoring}
 RELEASE=${RELEASE:-monitoring}
 KPS_VERSION=${KPS_VERSION:-}
 
-# Public Redpanda Grafana dashboard. Pinned so the install is
-# reproducible. If the URL 404s in the future, list what's available with:
-#   curl -s https://api.github.com/repos/redpanda-data/observability/contents/grafana-dashboards
-# Drift caught 2026-05-03 — the previous filename `Kubernetes-Redpanda.json`
-# 404s; the actual file in that repo is `Redpanda-Default-Dashboard.json`.
-DASHBOARD_URL=${DASHBOARD_URL:-https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/Redpanda-Default-Dashboard.json}
+# Redpanda Grafana dashboards from redpanda-data/observability (the same
+# source `rpk generate grafana-dashboard --dashboard <name>` pulls from
+# at runtime). We pre-load three:
+#
+#   Ops dashboard          — broker KPI + health (throughput, latency,
+#                            disk free bytes, leadership distribution by
+#                            rack, URP, leader elections). 41 panels.
+#                            Best for Demo A's "watch leaders move" view.
+#   Topic-metrics dashboard — per-topic throughput / on-disk size /
+#                            read+write rates. Best for OMB observation:
+#                            filter to topic=load-test and watch the
+#                            ~30 MB/s producer rate live.
+#   Default dashboard       — older legacy view kept as a familiar fallback.
+#
+# All three drop into the General folder via the sidecar (chart default
+# at /tmp/dashboards). Drift caught 2026-05-03 (the original
+# Kubernetes-Redpanda.json 404'd) and 2026-05-04 (added Ops + Topic
+# Metrics so the user gets cross-cloud throughput, disk pressure, and
+# OMB rate views out of the box).
+DASHBOARD_URLS=(
+  "https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/Redpanda-Ops-Dashboard.json|redpanda-ops-dashboard"
+  "https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/Kafka-Topic-Metrics.json|redpanda-topic-metrics-dashboard"
+  "https://raw.githubusercontent.com/redpanda-data/observability/main/grafana-dashboards/Redpanda-Default-Dashboard.json|redpanda-default-dashboard"
+)
 
 log() { echo "[install-monitoring] $*" >&2; }
 
@@ -79,21 +97,26 @@ helm --kube-context "$CTX" upgrade --install "$RELEASE" prometheus-community/kub
   -f "$REPO_ROOT/monitoring/values.yaml" \
   --wait --timeout 10m
 
-# Pull the Redpanda dashboard and load it as a labelled ConfigMap. The
-# Grafana sidecar (label=grafana_dashboard, value=1) auto-imports it.
-log "fetching Redpanda Grafana dashboard from $DASHBOARD_URL"
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-if ! curl -fsSL "$DASHBOARD_URL" -o "$tmp"; then
-  log "WARNING: could not fetch dashboard — Grafana will still work, just without the Redpanda dashboard pre-loaded."
-  log "         Import it manually from https://github.com/redpanda-data/observability or set DASHBOARD_URL to a local file:// path."
-else
-  kubectl --context "$CTX" -n "$NAMESPACE" create configmap redpanda-dashboard \
-    --from-file=redpanda.json="$tmp" \
+# Pull each Redpanda dashboard JSON and load as a labelled ConfigMap.
+# The Grafana sidecar (label=grafana_dashboard, value=1) auto-imports.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+for entry in "${DASHBOARD_URLS[@]}"; do
+  url=${entry%|*}
+  cm=${entry##*|}
+  fname="$(basename "$url")"
+  log "fetching $fname"
+  if ! curl -fsSL "$url" -o "$tmp/$fname"; then
+    log "  WARNING: could not fetch $fname — skipping (Grafana will still work, just without this dashboard)"
+    continue
+  fi
+  kubectl --context "$CTX" -n "$NAMESPACE" create configmap "$cm" \
+    --from-file="$fname=$tmp/$fname" \
     --dry-run=client -o yaml | \
     kubectl --context "$CTX" label --local --dry-run=client -f - grafana_dashboard=1 -o yaml | \
-    kubectl --context "$CTX" apply -f - >/dev/null
-fi
+    kubectl --context "$CTX" apply -f - >/dev/null \
+    && log "  loaded as ConfigMap $cm"
+done
 
 log "waiting for Grafana LoadBalancer to receive a public hostname (max 5m)"
 url=""

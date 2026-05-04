@@ -442,14 +442,19 @@ echo "Pass: $(kubectl --context rp-aws -n monitoring get secret monitoring-grafa
   -o jsonpath='{.data.admin-password}' | base64 -d)"
 ```
 
-After login:
+After login (left nav → Dashboards (four-square icon) → Browse → **General** folder):
 
-| Pane | Where to click | What you see |
+`install-monitoring.sh` pre-loads **three Redpanda dashboards** sourced from [redpanda-data/observability](https://github.com/redpanda-data/observability) (same source `rpk generate grafana-dashboard --dashboard <name>` uses), plus the kube-prometheus-stack chart's ~20 default Kubernetes dashboards.
+
+| What you want to see | Open this dashboard | Notes |
 |---|---|---|
-| **All dashboards** | left nav → Dashboards (4-square icon) → Browse | All sidecar-loaded dashboards land in **General** folder. The chart bundles ~20 Kubernetes-side dashboards (apiserver, nodes, pods, kubelet, namespace, prometheus, etc.); `install-monitoring.sh` adds **`Redpanda Dashboard`** sourced from [redpanda-data/observability](https://github.com/redpanda-data/observability) |
-| **Redpanda metrics** | Dashboards → "Redpanda Dashboard" | Per-broker produce/consume MB/s, p50/p95/p99 latency, leader counts by rack, URP/leader-elections during failover, broker CPU/disk |
-| **Per-region broker view** | Use the dashboard's `instance` or `pod` variable selector at the top — filter to `redpanda-rp-aws-*` / `redpanda-rp-gcp-*` / `redpanda-rp-azure-*` | Same metrics scoped to one cluster's brokers |
-| **Cross-cluster aggregate** | Sum panels (default view) | All 5 brokers' metrics aggregated across clouds — Prometheus's cross-cluster Endpoints SD picks them all up via the operator's flat-mode EndpointSlices on rp-aws (no per-cluster federation needed) |
+| **Broker health, throughput, latency, leader counts by rack** | **Redpanda Ops Dashboard** | 41-panel KPI view. Best dashboard for Demo A's "watch leaders migrate aws → gcp → aws" — leader-count panel is grouped by `rack` label. Also shows under-replicated partitions, leader elections, p50/p95/p99 latency. |
+| **OMB throughput per-topic — produce + consume rates on `load-test`** | **Kafka Topic Metrics** | Filter to topic=`load-test` (variable selector at top). Shows the ~30 MB/s OMB producer rate and consumer drain rate live. |
+| **Disk pressure on each broker (free bytes, used%)** | **Redpanda Ops Dashboard** → "Disk usage" panel | `redpanda_storage_disk_free_bytes` / `_total_bytes`. Watch this during Demo B — `Over Disk Limit Nodes` showed up here first. Compare against the autobalancer's `partition_autobalancing_max_disk_usage_percent: 80` threshold (committed in `<cloud>/manifests/stretchcluster.yaml`). |
+| **Cross-cloud network bytes (broker pod RX/TX)** | **Kubernetes / Networking / Pod** | Filter `namespace=redpanda` + `pod=~redpanda-rp-(aws\|gcp\|azure).*`. RX/TX bytes per broker pod approximates cross-cloud traffic (since intra-cluster pod traffic stays local; cross-cluster Cilium-tunneled traffic counts as pod network too). For exact cross-cloud bytes, use the cloud-provider billing metrics — Prometheus from inside the cluster can't reliably distinguish "intra-VPC" from "cross-VPC" traffic. |
+| **Per-region broker view** | Any Redpanda dashboard's `instance` / `pod` variable selector | Filter to `redpanda-rp-aws-*` / `redpanda-rp-gcp-*` / `redpanda-rp-azure-*` to scope to one cluster's brokers. |
+| **Cross-cluster aggregate (all 5 brokers, no filter)** | Default view (no variable filter) | All brokers' metrics aggregated across clouds — Prometheus's cross-cluster Endpoints SD picks them all up via the operator's flat-mode EndpointSlices on rp-aws (no per-cluster federation needed). |
+| **Generate a fresh dashboard tailored to your live cluster's metrics endpoint** | `kubectl exec` into a broker | `rpk generate grafana-dashboard --dashboard {operations\|topic-metrics\|consumer-metrics\|consumer-offsets}` — the JSON it prints is what install-monitoring.sh fetches from the same upstream repo. Useful if the cluster's metric names diverge from the pre-baked dashboards. |
 
 > **If "Dashboards → Browse" is empty after login**, the sidecar's dashboard provisioning probably failed. Check `kubectl --context rp-aws -n monitoring logs deployment/monitoring-grafana -c grafana-sc-dashboard` — should show `Writing /tmp/dashboards/<name>.json (ascii)` for each chart-bundled and our redpanda-dashboard ConfigMap. Failure modes seen during 2026-05-04 e2e v3:
 >
