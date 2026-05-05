@@ -1,0 +1,201 @@
+{
+  "title": "Redpanda Cross-Cloud Demo B — Regional Failure + Capacity Injection",
+  "uid": "redpanda-xc-demo-b",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "tags": ["redpanda", "demo-b", "stretch", "cross-cloud", "autodecom"],
+  "time": { "from": "now-45m", "to": "now" },
+  "refresh": "10s",
+  "timezone": "browser",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "About this dashboard",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Redpanda Cross-Cloud Demo B — single-pane view of all 5+ brokers across rp-aws / rp-gcp / rp-azure**\n\nEach panel queries all three clouds' Prometheus instances (`Prometheus-AWS`, `Prometheus-GCP`, `Prometheus-Azure`) and aggregates by pod name. The pod naming convention `redpanda-rp-<cloud>-N` makes the cloud obvious in the legend; new brokers from the NodePool scale-up appear as `redpanda-rp-gcp-2`, `redpanda-rp-gcp-3`.\n\n**Survivability:** when AWS is cordoned (T0), `Prometheus-AWS` becomes unreachable and its series go to *No data*; surviving clouds keep streaming. Cluster-wide gauges (broker count, URP, unavailable partitions) are reported by every broker, so any surviving cloud's Prometheus answers correctly.\n\n**Expected timeline (≈30 min):**\n1. T0 — cordon AWS + delete pods. AWS series drop. `Cluster broker count` → 5 → 3. URP spikes.\n2. T+10min — autobalancer flags `Unavailable Nodes: [0, 1]`.\n3. T+10min — patch rp-gcp NodePool 2 → 4. Two new brokers (`redpanda-rp-gcp-2`, `redpanda-rp-gcp-3`) appear in Prometheus-GCP series. Their disk-free curves drop as replicas land.\n4. T+15min — autodecom either fires (clean run) or stalls on no-quorum RF=3 internal topics (cross-cloud finding). Use `rpk redpanda admin brokers decommission --skip-liveness-check` workaround if needed.\n5. T+25min — uncordon AWS. AWS pods rejoin reading existing PVC data → original IDs (0, 1) come back, decom completes once quorum is restored.\n\nIf *Storage health alert* turns yellow/red, that's the original Demo B blocker — out-of-disk on a surviving broker."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Cluster broker count (any cloud — same gauge cluster-wide)",
+      "description": "max(redpanda_cluster_brokers) per cloud's Prometheus. All 3 series should overlap exactly at steady state because every broker reports the cluster total. If they diverge, you're seeing controller-level membership flapping (cross-cloud heartbeat caveat).",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "max(redpanda_cluster_brokers)", "legendFormat": "via Prometheus-AWS", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "max(redpanda_cluster_brokers)", "legendFormat": "via Prometheus-GCP", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "max(redpanda_cluster_brokers)", "legendFormat": "via Prometheus-Azure", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "auto" }
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Under-replicated partitions (cluster-wide)",
+      "description": "sum(redpanda_kafka_under_replicated_replicas). Spikes at cordon (every RF=5 topic loses 2 replicas), drains as autobalancer reassigns. Persistent baseline > 0 under OMB load is the cross-cloud VPN replication-lag signature.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "sum(redpanda_kafka_under_replicated_replicas)", "legendFormat": "via AWS", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "sum(redpanda_kafka_under_replicated_replicas)", "legendFormat": "via GCP", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "sum(redpanda_kafka_under_replicated_replicas)", "legendFormat": "via Azure", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 20 } ] }
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Disk free per broker — ALL CLOUDS (MB)",
+      "description": "redpanda_storage_disk_free_bytes / 1024^2. New rp-gcp pods (rp-gcp-2/3) appear with full disks at the NodePool patch, drop as replicas land.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "redpanda_storage_disk_free_bytes / 1024 / 1024", "legendFormat": "{{pod}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "redpanda_storage_disk_free_bytes / 1024 / 1024", "legendFormat": "{{pod}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "redpanda_storage_disk_free_bytes / 1024 / 1024", "legendFormat": "{{pod}}", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-aws-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-gcp-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-azure-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "min"] }, "tooltip": { "mode": "multi", "sort": "asc" } }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Partitions moving TO node — ALL CLOUDS",
+      "description": "sum by (pod) (redpanda_cluster_partition_moving_to_node). Spikes after capacity injection un-stalls the autobalancer; new GCP brokers receive the most.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "sum by (pod) (redpanda_cluster_partition_moving_to_node)", "legendFormat": "{{pod}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "sum by (pod) (redpanda_cluster_partition_moving_to_node)", "legendFormat": "{{pod}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "sum by (pod) (redpanda_cluster_partition_moving_to_node)", "legendFormat": "{{pod}}", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "showPoints": "auto" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-aws-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-gcp-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-azure-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["max", "lastNotNull"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Kafka throughput per broker — ALL CLOUDS (Bps)",
+      "description": "rate(redpanda_kafka_request_bytes_total[1m]). OMB throughput should keep flowing across the demo with at most a brief notch at cordon.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total[1m]))", "legendFormat": "{{pod}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total[1m]))", "legendFormat": "{{pod}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total[1m]))", "legendFormat": "{{pod}}", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-aws-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-gcp-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-azure-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "lastNotNull"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Storage health alert (any cloud)",
+      "description": "max(redpanda_storage_disk_free_space_alert). 0 = OK, 1 = Low Space, 2 = Degraded.",
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "max(redpanda_storage_disk_free_space_alert)", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [{ "type": "value", "options": { "0": { "text": "OK" }, "1": { "text": "Low Space" }, "2": { "text": "Degraded" } } }],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 2 } ] }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" } }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Unavailable partitions (cluster-wide)",
+      "description": "Should stay 0 — RF=5 with 2 brokers down still has majority quorum across surviving racks.",
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "sum(redpanda_cluster_unavailable_partitions)", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" } }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Brokers (across all 3 clouds combined)",
+      "description": "Sum of brokers each cloud's Prometheus is scraping. At steady state = total broker count. Watch for the dip when AWS goes down (its 2 brokers stop being scraped).",
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "count(redpanda_application_uptime_seconds_total)", "refId": "A", "legendFormat": "AWS scrapes" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "count(redpanda_application_uptime_seconds_total)", "refId": "B", "legendFormat": "GCP scrapes" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "count(redpanda_application_uptime_seconds_total)", "refId": "C", "legendFormat": "Azure scrapes" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 3 }, { "color": "green", "value": 5 } ] }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }, "textMode": "value_and_name" }
+    }
+  ]
+}

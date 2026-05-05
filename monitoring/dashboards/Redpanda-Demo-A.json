@@ -1,0 +1,424 @@
+{
+  "title": "Redpanda Demo A — Leader Pinning + Cross-Cloud Fallthrough",
+  "uid": "redpanda-demo-a",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "tags": [
+    "redpanda",
+    "demo-a",
+    "stretch"
+  ],
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "refresh": "10s",
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Leadership transfers",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "enable": true,
+        "iconColor": "orange",
+        "expr": "changes(redpanda_raft_leadership_changes_total[1m]) > 0"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "About this dashboard",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Demo A — Leader Pinning + Cross-Cloud Fallthrough**\n\nThis cluster's local Prometheus only scrapes the brokers running in **this** cloud. To see the full cross-cloud picture, open the same dashboard in each cloud's Grafana side-by-side, or open the Cross-Cloud Demo A dashboard on rp-gcp Grafana for a single-pane view.\n\n**Reading the legends — pod names tell you the cloud.** All series are labeled with the broker's pod name (`{{pod}}` in legends), and the operator names broker pods `redpanda-rp-<cloud>-N` — so `redpanda-rp-aws-0` and `redpanda-rp-aws-1` are the AWS brokers, `redpanda-rp-gcp-0` / `redpanda-rp-gcp-1` are GCP, `redpanda-rp-azure-0` is Azure. (Each cloud's Prometheus only sees its own brokers, so e.g. on rp-gcp Grafana you'll only see `redpanda-rp-gcp-*` legends.)\n\n**Why these panels show 'leader activity', not 'leader count':** Redpanda's public_metrics doesn't expose a per-broker leader-count gauge. The visible leader signal is **produce traffic** — only the partition leader receives produce requests, so a broker's produce rate is a direct proxy for how many leaders it is currently serving live traffic for. The `redpanda_kafka_max_offset` metric is per-replica (every broker holding a copy emits it), so a count() over it just yields replicas-held-per-broker — not Demo A's signal.\n\nExpected pattern during Demo A:\n- **T0 (steady state)**: AWS brokers carry all produce traffic for `load-test` (`ordered_racks:aws,gcp,azure` pins leaders to AWS rack). On rp-aws Grafana: `redpanda-rp-aws-0/1` produce rate ≈ full OMB load; on rp-gcp / rp-azure Grafanas: produce rate = 0.\n- **Cordon + delete AWS broker pods**: rp-aws Grafana goes flat (targets DOWN). rp-gcp Grafana shows `redpanda-rp-gcp-0` and `redpanda-rp-gcp-1` produce rate climb within ~5–10s. Throughput continues uninterrupted.\n- **Restore AWS**: AWS broker pods return. After leader-rebalancer settles, produce traffic flows back to AWS rack on rp-aws Grafana; rp-gcp returns to 0."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Produce request rate per broker (this cloud) — leader-activity proxy",
+      "description": "sum by (pod) (rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"produce\"}[1m])). Only the partition leader receives produce requests, so this is a direct proxy for how many leaders this broker is currently serving live traffic for. Redpanda's public_metrics doesn't expose a per-broker leader-count gauge — this is the closest non-derived signal. Cordon-then-restore shows up as a step transfer of produce ops/s between pods.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"produce\"}[1m]))",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Bytes-in for 'load-test' per broker (this cloud) — leader-activity proxy",
+      "description": "sum by (pod) (rate(redpanda_kafka_request_bytes_total{redpanda_request=\"produce\",redpanda_topic=\"load-test\"}[1m])). Bytes the broker serves as leader for OMB's load-test partitions. When AWS is cordoned, AWS pods drop to 0 and GCP/Azure pods absorb the traffic.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total{redpanda_request=\"produce\",redpanda_topic=\"load-test\"}[1m]))",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Kafka throughput per broker (bytes/sec)",
+      "description": "rate(redpanda_kafka_request_bytes_total[1m]). Should stay roughly constant across the demo even as leaders shift — clients reconnect to new leaders within seconds.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total[1m]))",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Leadership transfer rate per broker",
+      "description": "sum by (pod) (rate(redpanda_raft_leadership_changes_total[1m])). Spikes when the leader-balancer moves leaders — expect bursts at cordon and at restore.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(redpanda_raft_leadership_changes_total[1m]))",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Under-replicated partitions (cluster-wide)",
+      "description": "redpanda_kafka_under_replicated_replicas — should briefly rise during failover then return to 0 once the surviving brokers catch followers up.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 23
+      },
+      "targets": [
+        {
+          "expr": "sum(redpanda_kafka_under_replicated_replicas)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Total partitions (cluster-wide)",
+      "description": "redpanda_cluster_partitions — the global partition count. Reported identically by every broker, so safe to display from any cloud's Prometheus.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 23
+      },
+      "targets": [
+        {
+          "expr": "max(redpanda_cluster_partitions)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Brokers this cloud is currently leading for (proxy)",
+      "description": "count(rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"produce\"}[1m]) > 0). Pods this cloud's Prometheus is scraping that are currently serving produce traffic — i.e. holding at least one leader for a topic with active producers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 23
+      },
+      "targets": [
+        {
+          "datasource": null,
+          "expr": "count(rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"produce\"}[1m]) > 0)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,621 @@
+{
+  "title": "Redpanda Demo B — Regional Failure + Capacity Injection",
+  "uid": "redpanda-demo-b",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "tags": [
+    "redpanda",
+    "demo-b",
+    "stretch",
+    "autodecom"
+  ],
+  "time": {
+    "from": "now-45m",
+    "to": "now"
+  },
+  "refresh": "10s",
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "About this dashboard",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Demo B — Regional Failure + Capacity Injection**\n\n**Important:** open this dashboard on **rp-gcp** or **rp-azure** Grafana. rp-aws Grafana goes dark the moment AWS is cordoned — its Prometheus pods are unreachable too. The surviving cloud's Prometheus keeps scraping its local brokers, and the cluster-wide gauges (broker count, under-replicated partitions, unavailable partitions) are reported by every broker, so any surviving Prometheus sees them correctly.\n\n**Reading the legends — pod names tell you the cloud.** Per-broker series are labeled with pod names (`redpanda-rp-aws-0/1`, `redpanda-rp-gcp-0/1`, `redpanda-rp-azure-0`); the cloud is in the name. Each Prometheus only scrapes its own cloud's brokers, so on rp-gcp Grafana you'll see `redpanda-rp-gcp-*` series and watch new pods (`redpanda-rp-gcp-2`, `redpanda-rp-gcp-3`) appear when the NodePool patch lands.\n\nExpected timeline (≈30 min total):\n1. **T0 — cordon AWS + delete pods.** Broker count drops from 5 → 3. Under-replicated partitions spike (every RF=5 topic loses 2 replicas). Unavailable partitions stays 0 (quorum holds across racks).\n2. **T+10 min — autobalancer stalls.** `node_availability_timeout` fires; autobalancer flags AWS brokers unavailable but has nowhere to put their replicas yet.\n3. **T+10 min — patch rp-gcp NodePool 2 → 4.** Two new broker pods (IDs 5, 6) come up on the new GCP nodes. Watch *Disk free per broker* — the new brokers start with full disks, then fill as replicas land on them.\n4. **T+15 min — autodecom fires.** Brokers 0, 1 (AWS) get auto-decommissioned. *Cluster broker count* climbs back to 5. *Partitions moving to/from* spikes during reassignment, then drains. *Under-replicated partitions* drains to 0.\n5. **T+25 min — uncordon AWS.** Broker count climbs to 7 (AWS brokers re-join as new IDs 7, 8 — they were decommissioned, can't reclaim 0/1).\n6. **T+30 min — patch rp-gcp NodePool back to 2.** Operator decommissions brokers 5, 6 gracefully. Broker count returns to 5.\n\nIf *Storage health alert* turns yellow/red, that's the original Demo B blocker — out-of-disk on a surviving broker. The committed manifests pin PVC size to 200 Gi + `log_retention_ms=3600000` (1h) to keep the demo runnable; if you've changed those, the alert may fire."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Cluster broker count (cluster-wide)",
+      "description": "max(redpanda_cluster_brokers) — reported identically by every broker, so safe to read from any surviving cloud's Prometheus. Watch it dip from 5 → 3 at cordon, climb to 5 after GCP scale-up + autodecom, jump to 7 at AWS uncordon, return to 5 after the GCP drain.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "max(redpanda_cluster_brokers)",
+          "legendFormat": "brokers",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "auto"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 4
+              },
+              {
+                "color": "green",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Under-replicated partitions (cluster-wide)",
+      "description": "sum(redpanda_kafka_under_replicated_replicas). Spikes at cordon (every RF=5 topic loses 2 replicas), drains to 0 after autodecom + reassignment.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "sum(redpanda_kafka_under_replicated_replicas)",
+          "legendFormat": "URP",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "auto"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Disk free per broker (this cloud, MB)",
+      "description": "redpanda_storage_disk_free_bytes per broker. If any line dives toward 0, you've hit the original Demo B blocker — replicas can't move to a broker that's already full. Committed PVC size is 200 Gi + log_retention 1h.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "targets": [
+        {
+          "expr": "redpanda_storage_disk_free_bytes / 1024 / 1024",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "min"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "asc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Disk used % per broker (this cloud)",
+      "description": "(total - free) / total × 100. Watch new GCP brokers (IDs 5, 6) climb from ~0% as replicas land on them.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "targets": [
+        {
+          "expr": "100 * (redpanda_storage_disk_total_bytes - redpanda_storage_disk_free_bytes) / redpanda_storage_disk_total_bytes",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Partitions moving TO node (this cloud)",
+      "description": "redpanda_cluster_partition_moving_to_node. Spikes when autobalancer un-stalls and starts re-replicating onto the new GCP brokers. Should drain back to 0 once reassignment completes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (redpanda_cluster_partition_moving_to_node)",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Partitions moving FROM node (this cloud)",
+      "description": "redpanda_cluster_partition_moving_from_node. Mirror of the above — partitions leaving a broker. During autodecom this is what the AWS brokers' replicas show as they're re-homed elsewhere.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (redpanda_cluster_partition_moving_from_node)",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Kafka throughput per broker (this cloud, Bytes/sec)",
+      "description": "rate(redpanda_kafka_request_bytes_total[1m]). Shows OMB traffic continuing across the demo even with 2 brokers down — the whole point of stretch.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total[1m]))",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Storage health alert (cluster-wide)",
+      "description": "max(redpanda_storage_disk_free_space_alert). 0 = OK, 1 = Low Space, 2 = Degraded. If this turns yellow or red, the autobalancer can't make progress and Demo B will appear hung.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 42
+      },
+      "targets": [
+        {
+          "expr": "max(redpanda_storage_disk_free_space_alert)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 2,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OK"
+                },
+                "1": {
+                  "text": "Low Space"
+                },
+                "2": {
+                  "text": "Degraded"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Unavailable partitions (cluster-wide)",
+      "description": "sum(redpanda_cluster_unavailable_partitions). Should stay at 0 across the entire demo — RF=5 with 2 brokers down still has majority quorum across the surviving racks. If this goes > 0 you've lost availability, not just replication health.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 42
+      },
+      "targets": [
+        {
+          "expr": "sum(redpanda_cluster_unavailable_partitions)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Brokers (this cloud is scraping)",
+      "description": "count by (app)(redpanda_application_uptime_seconds_total). Local-Prometheus view of how many brokers this cloud sees right now. Watch it climb from 2 to 4 on rp-gcp Grafana when the NodePool patch lands.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 42
+      },
+      "targets": [
+        {
+          "expr": "count by (app) (redpanda_application_uptime_seconds_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        }
+      }
+    }
+  ]
+}

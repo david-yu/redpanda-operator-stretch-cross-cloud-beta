@@ -1,0 +1,141 @@
+{
+  "title": "Redpanda Cross-Cloud Demo A — Leader Pinning + Fallthrough",
+  "uid": "redpanda-xc-demo-a",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "tags": ["redpanda", "demo-a", "stretch", "cross-cloud"],
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "10s",
+  "timezone": "browser",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "About this dashboard",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Redpanda Cross-Cloud Demo A — single-pane view of all 5 brokers across rp-aws / rp-gcp / rp-azure**\n\nEach panel queries all three clouds' Prometheus instances (datasources `Prometheus-AWS`, `Prometheus-GCP`, `Prometheus-Azure`) and aggregates the result by broker pod name. The pod naming convention `redpanda-rp-<cloud>-N` makes the cloud obvious in the legend.\n\n**Why these panels show 'leader activity', not 'leader count':** Redpanda doesn't expose a per-broker leader-count gauge in `public_metrics`. The visible leader signal is the **produce traffic** each broker handles — only the partition leader receives produce requests, so a broker's produce rate (requests/sec or bytes-in/sec) is a direct, real-time proxy for how many leaders it is currently serving.\n\n**Survivability when a cloud goes down:** if AWS is cordoned during Demo A step 3, the rp-aws Prometheus becomes unreachable and its series go to *No data* in each panel — but the GCP and Azure series keep streaming. You see the failover in real time without losing observability of the survivors. (For maximum resilience, also keep the per-cloud Grafana tabs open — if rp-gcp itself goes down, only the rp-aws / rp-azure Grafanas keep working.)\n\n**Expected pattern during Demo A:**\n- T0 (steady state): leaders pinned to AWS rack via `ordered_racks:aws,gcp,azure`. AWS pods (`redpanda-rp-aws-0/1`) carry all the produce traffic for `load-test`; GCP and Azure pods at 0 produce rate.\n- After cordon: AWS series disappear (Prometheus-AWS unreachable). GCP pods (`redpanda-rp-gcp-0/1`) pick up the produce traffic within 5–10s.\n- After uncordon: AWS series return. Produce traffic flows back to AWS rack (under sustained OMB load you may need the `transfer_leadership` admin API workaround documented in the README to push it back)."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Produce request rate per broker — ALL CLOUDS (leader-activity proxy)",
+      "description": "sum by (pod) (rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"produce\"}[1m])). Only the partition leader receives produce requests, so a broker's produce rate is a direct proxy for how many leaders it is currently serving live traffic for. Redpanda doesn't expose a leader-count gauge directly — this is the closest non-derived signal. (`redpanda_kafka_max_offset` is per-replica, not per-leader, so a count() over it just reports replicas-held-per-broker, which is roughly equal across all brokers and not Demo-A-meaningful.)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"produce\"}[1m]))", "legendFormat": "{{pod}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"produce\"}[1m]))", "legendFormat": "{{pod}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_latency_seconds_count{redpanda_request=\"produce\"}[1m]))", "legendFormat": "{{pod}}", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-aws-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-gcp-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-azure-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Bytes-in rate for 'load-test' per broker — ALL CLOUDS (leader-activity proxy)",
+      "description": "sum by (pod) (rate(redpanda_kafka_request_bytes_total{redpanda_request=\"produce\"}[1m])) — bytes the broker is serving as the leader for the OMB workload's partitions. When AWS is cordoned, AWS pods stop receiving produce traffic and their lines drop to 0; the GCP pods take over.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total{redpanda_request=\"produce\"}[1m]))", "legendFormat": "{{pod}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total{redpanda_request=\"produce\"}[1m]))", "legendFormat": "{{pod}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total{redpanda_request=\"produce\"}[1m]))", "legendFormat": "{{pod}}", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-aws-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-gcp-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-azure-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Kafka throughput per broker — ALL CLOUDS (Bps)",
+      "description": "rate(redpanda_kafka_request_bytes_total[1m]). Stays roughly constant across the demo; brief notch during leader transitions.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total[1m]))", "legendFormat": "{{pod}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total[1m]))", "legendFormat": "{{pod}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "sum by (pod) (rate(redpanda_kafka_request_bytes_total[1m]))", "legendFormat": "{{pod}}", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-aws-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-gcp-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-azure-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Leadership transfer rate per broker — ALL CLOUDS",
+      "description": "sum by (pod) (rate(redpanda_raft_leadership_changes_total[1m])). Spikes when leader-balancer moves leaders during cordon and restore.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 36 },
+      "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "PF0528EF25F2024B6" }, "expr": "sum by (pod) (rate(redpanda_raft_leadership_changes_total[1m]))", "legendFormat": "{{pod}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "PF2AF1CE8C60FA39E" }, "expr": "sum by (pod) (rate(redpanda_raft_leadership_changes_total[1m]))", "legendFormat": "{{pod}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "P798A6BC1AFC6F104" }, "expr": "sum by (pod) (rate(redpanda_raft_leadership_changes_total[1m]))", "legendFormat": "{{pod}}", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "auto" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-aws-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-gcp-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byRegexp", "options": "redpanda-rp-azure-.*" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["max", "lastNotNull"] },
+        "tooltip": { "mode": "multi" }
+      }
+    }
+  ]
+}
