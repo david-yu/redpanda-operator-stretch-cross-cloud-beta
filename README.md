@@ -72,10 +72,10 @@ Companion to [`redpanda-operator-stretch-beta`](https://github.com/david-yu/redp
    └─────────────────────────────────────────────────────────────────────────────┘
                                     ▲           ▲           ▲
                                     │           │           │
-   ┌────────── AWS us-east-1 ──────┴┐  ┌── GCP us-east1 ──┴┐  ┌── Azure eastus ──┴┐
-   │ EKS: rp-aws         cluster.id=1│  │ GKE: rp-gcp       │  │ AKS: rp-azure     │
-   │   • CNI: Cilium (no aws-vpc-cni)│  │   • CNI: Cilium   │  │   • CNI: Cilium   │
-   │   • pod CIDR 10.110.0.0/16     │  │   (no DPv2)        │  │   (BYOCNI)        │
+   ┌────────── AWS us-east-1 ──-────┴┐  ┌── GCP us-east1 ─-─┴┐  ┌── Azure eastus ──┴┐
+   │ EKS: rp-aws         cluster.id=1│  │ GKE: rp-gcp        │  │ AKS: rp-azure     │
+   │   • CNI: Cilium (no aws-vpc-cni)│  │   • CNI: Cilium    │  │   • CNI: Cilium   │
+   │   • pod CIDR 10.110.0.0/16      │  │   (no DPv2)        │  │   (BYOCNI)        │
    │   • VPC 10.10.0.0/16            │  │   • VPC 10.20.0/16 │  │   • VNet 10.30/16 │
    │   • 2× m5.xlarge nodes          │  │   • 2× n2-std-4    │  │   • 2× D4s_v5     │
    │   • 2 broker pods (rack=aws)    │  │   • 2 brokers      │  │   • 1 broker      │
