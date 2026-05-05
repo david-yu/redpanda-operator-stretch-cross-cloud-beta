@@ -11,10 +11,13 @@
 #      LoadBalancer Services so no orphan cloud LBs leak)
 #   5. Prune kubernetes_* / helm_release.* from each cloud's TF state
 #      (avoids `context deadline exceeded` once the cluster is gone)
-#   6. terraform destroy on each cloud's terraform/ directory
-#   7. Cloud-specific orphan sweep (AWS NLBs/SGs/ENIs, Azure MC_* LBs)
-#   8. Final terraform destroy pass to pick up anything the sweep unblocked
-#   9. Clean rp-* kubectl contexts/clusters/users from kubeconfig
+#   6. PRE-destroy AWS orphan sweep — clear classic ELBs / NLBs / ENIs /
+#      k8s-elb-* SGs that block VPC delete (would otherwise hang TF for
+#      11-15min PER orphan dependency at the IGW + VPC delete steps).
+#   7. terraform destroy on each cloud's terraform/ directory
+#   8. POST-destroy cloud sweep (AWS customer gateways, Azure MC_* LBs)
+#   9. Final terraform destroy pass to pick up anything the sweep unblocked
+#  10. Clean rp-* kubectl contexts/clusters/users from kubeconfig
 #
 # Usage:
 #   ./teardown.sh --gcp-project <id>
@@ -127,7 +130,20 @@ tf_destroy() {
 }
 
 # AWS orphan sweep — same logic as the same-cloud aws/scripts/teardown.sh.
-aws_sweep() {
+# Pre-destroy AWS sweep — runs BEFORE per-cloud terraform destroy.
+#
+# These are the orphan resources that block aws/terraform's VPC-level
+# delete: ELBs/NLBs hold ENIs in subnets, k8s-elb-* SGs sit in the VPC.
+# When TF tries to destroy the VPC and finds these dependencies, it
+# polls for ~11-15min PER resource before giving up — drift caught
+# 2026-05-04 v4 e2e: orphan classic ELBs from Cilium ClusterMesh +
+# k8s-elb-* SGs from those ELBs (the SGs survive ELB delete in some
+# AWS LBC race conditions) caused IGW destroy to hang 15min, then VPC
+# destroy to hang another 11min for a total +26min on AWS teardown.
+#
+# Hoisting the sweep to PRE-destroy means the per-cloud TF destroy
+# finds a clean VPC and completes in ~5min instead of ~30min.
+aws_pre_destroy_sweep() {
   for r in "$@"; do
     # Cilium clustermesh-apiserver Service type=LoadBalancer creates
     # *classic* ELBs (ELBv1) — `aws elbv2 describe-load-balancers` does
@@ -205,12 +221,19 @@ aws_sweep() {
       aws ec2 delete-security-group --region "$r" --group-id "$sg" 2>/dev/null \
         && log "  deleted sg: $sg" || true
     done
-    # AWS customer gateways live in aws/, but they're created by
-    # vpn/terraform's `aws_customer_gateway.{gcp,azure}` against the
-    # AWS provider. If vpn/ destroy fails (which the new phase-1 CLI
-    # cleanup handles for the *connections*, but not for customer
-    # gateways themselves), they stay around as $0 orphans. Sweep by
-    # the rp-{gcp,azure}-cgw Name tag the VPN module sets.
+  done
+}
+
+# Post-destroy AWS sweep — runs AFTER per-cloud terraform destroy.
+#
+# Customer gateways are an orthogonal cleanup: they're created by
+# vpn/terraform's `aws_customer_gateway.{gcp,azure}` against the AWS
+# provider, and only become orphaned when vpn/terraform destroy hits
+# the state-rm fallback (the connections come down via phase-1 CLI
+# cleanup, but customer gateways have no parallel CLI step). They
+# don't block VPC delete, so they belong in the post-destroy slot.
+aws_post_destroy_sweep() {
+  for r in "$@"; do
     log "$r: sweep orphan customer gateways (rp-*-cgw tagged)"
     for cgw in $(aws ec2 describe-customer-gateways --region "$r" \
       --query 'CustomerGateways[?Tags[?Key==`Name` && (Value==`rp-gcp-cgw` || Value==`rp-azure-cgw`)] && State==`available`].CustomerGatewayId' \
@@ -393,6 +416,16 @@ if ! terraform destroy -auto-approve \
 fi
 popd >/dev/null
 
+# Pre-destroy AWS orphan sweep: clear ELBs / NLBs / ENIs / k8s-elb-* SGs
+# BEFORE the per-cloud TF destroy, otherwise terraform's VPC delete
+# polls 11-15min PER orphan dependency. Runs only against AWS regions
+# (Azure equivalents — chart-managed LBs in MC_* RGs — are handled by
+# `azure_sweep` after destroy because the AKS resource group needs to
+# exist while we're sweeping it; AWS LBs are cluster-independent and
+# can be swept any time after the chart is uninstalled).
+log "=== pre-destroy AWS orphan sweep (unblocks VPC delete) ==="
+aws_pre_destroy_sweep "${AWS_REGIONS[@]}"
+
 log "=== terraform destroy each cloud ==="
 tf_state_rm_k8s "$REPO_ROOT/aws/terraform"
 tf_destroy      "$REPO_ROOT/aws/terraform"
@@ -402,7 +435,7 @@ tf_state_rm_k8s "$REPO_ROOT/azure/terraform"
 tf_destroy      "$REPO_ROOT/azure/terraform"
 
 log "=== post-destroy cloud sweeps ==="
-aws_sweep "${AWS_REGIONS[@]}"
+aws_post_destroy_sweep "${AWS_REGIONS[@]}"
 azure_sweep
 
 log "=== final terraform destroy pass ==="
