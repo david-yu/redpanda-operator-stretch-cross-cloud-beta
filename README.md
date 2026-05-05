@@ -145,7 +145,8 @@ Within a single cluster the broker traffic stays inside that cloud's VPC/VNet �
 │   └── README.md
 ├── monitoring/
 │   ├── values.yaml             # kube-prometheus-stack values: Grafana LB + dashboard sidecar
-│   └── redpanda-podmonitor.yaml # per-cloud PodMonitor: each cluster's Prometheus scrapes only LOCAL broker pods
+│   ├── redpanda-podmonitor.yaml # per-cloud PodMonitor: each cluster's Prometheus scrapes only LOCAL broker pods
+│   └── dashboards/             # vendored Grafana dashboard JSONs (Ops/Default/Topic Metrics + project-original Demo A); patched for MB units + per-cloud branding
 └── scripts/
     ├── install-cilium.sh       # per-cloud Cilium install
     ├── connect-mesh.sh         # enable + connect 3-way Cilium ClusterMesh
@@ -154,7 +155,7 @@ Within a single cluster the broker traffic stays inside that cloud's VPC/VNet �
     ├── annotate-rack.sh        # idempotent re-annotation of nodes — re-run after any GKE/EKS/AKS resize, autoscaler add, or Demo B capacity-injection step
     ├── install-console.sh      # Console on rp-aws (LB + URL printed at end)
     ├── install-omb.sh          # creates load-test topic + applies OMB Jobs (\~30 MB/s)
-    ├── install-monitoring.sh   # kube-prometheus-stack + 3 Redpanda dashboards on EVERY cluster (per-cloud design); prints 3 Grafana URLs+creds
+    ├── install-monitoring.sh   # kube-prometheus-stack + 5 Redpanda dashboards (Ops, Default, Topic Metrics, Demo A, Demo B) on EVERY cluster (per-cloud design); injects kube-context into Ops + Demo-A + Demo-B titles; prints 3 Grafana URLs+creds
     └── teardown.sh             # full multi-cloud teardown (uninstalls demo addons first)
 ```
 
@@ -453,15 +454,30 @@ done
 
 After login (left nav → Dashboards (four-square icon) → Browse → **General** folder):
 
-`install-monitoring.sh` pre-loads **three Redpanda dashboards** on every cloud's Grafana, sourced from [redpanda-data/observability](https://github.com/redpanda-data/observability) (same source `rpk generate grafana-dashboard --dashboard <name>` uses). The kube-prometheus-stack chart's ~20 bundled Kubernetes dashboards are explicitly disabled (`grafana.defaultDashboardsEnabled: false` in `monitoring/values.yaml`) to keep the Grafana UI focused on Redpanda.
+`install-monitoring.sh` pre-loads **five dashboards** on every cloud's Grafana, vendored locally in `monitoring/dashboards/` so the install path doesn't depend on `raw.githubusercontent.com` reachability and so we can ship project-specific patches without forking upstream. The kube-prometheus-stack chart's ~20 bundled Kubernetes dashboards are explicitly disabled (`grafana.defaultDashboardsEnabled: false` in `monitoring/values.yaml`) to keep the Grafana UI focused on Redpanda.
+
+The three upstream dashboards are pulled from [redpanda-data/observability](https://github.com/redpanda-data/observability) (same source `rpk generate grafana-dashboard --dashboard <name>` uses), with these patches:
+
+- **Default — storage panels in MB, not bytes.** `Disk storage bytes free.` and `Total size of attached storage, in bytes.` now render as `decmbytes` (e.g. `9 540 MB`) instead of raw `9540067840`. Easier to eyeball under load.
+- **Ops — title branded with kube-context + Nodes Up clarified.** Each cloud's Grafana shows the title `Redpanda Ops Dashboard (rp-aws)` / `(rp-gcp)` / `(rp-azure)` so it's obvious which cluster you're on when you tab between three Grafana URLs. The "Nodes Up" stat is renamed to **Nodes Up (this cloud)** with a tooltip explaining the per-cloud Prometheus quirk (see next paragraph).
+
+Two dashboards are project-original (also branded with kube-context):
+
+- **Redpanda Demo A — Leader Pinning + Cross-Cloud Fallthrough.** Per-broker leader count, throughput, leadership-transfer rate. See [Demo A walkthrough](#demo-a-leader-pinning--cross-cloud-failover-fallthrough).
+- **Redpanda Demo B — Regional Failure + Capacity Injection.** Cluster broker count, per-broker disk free/used, partitions moving in/out, storage health alert, unavailable partitions. See [Demo B walkthrough](#demo-b-regional-failure--capacity-injection-cross-cloud-variant).
+
+> **How the legends identify cloud.** Per-broker series in Demo A / Demo B / Default are labeled with the broker pod name — `redpanda-rp-aws-0`, `redpanda-rp-aws-1`, `redpanda-rp-gcp-0`, `redpanda-rp-gcp-1`, `redpanda-rp-azure-0`. The cloud is in the name. Each cloud's Prometheus only scrapes its own cluster's pods, so on rp-gcp Grafana you'll only see `redpanda-rp-gcp-*` series; during Demo B's NodePool scale-up new pods (`redpanda-rp-gcp-2`, `redpanda-rp-gcp-3`) appear in the same panel.
+
+> **Why "Nodes Up" disagrees between Default and Ops dashboards.** On any single cloud's Grafana you'll see the Default dashboard report `Nodes Up = 5` while the Ops dashboard reports `Nodes Up = 1` (rp-azure) or `2` (rp-aws / rp-gcp). Both are correct; they're answering different questions. Default queries `redpanda_cluster_brokers` — a cluster-wide gauge that every broker reports as the global count (5). Ops queries `count by (app) (redpanda_application_uptime_seconds_total{...})` — that counts how many broker scrape targets *this Prometheus has*, which under our per-cloud design is just the local cluster's pods. The patched Ops panel description spells this out at hover time.
 
 | What you want to see | Open this dashboard | Notes |
 |---|---|---|
-| **Broker health, throughput, latency, leader counts by rack — for THIS cloud's brokers** | **Redpanda Ops Dashboard** on the cloud you care about | 41-panel KPI view. Each cloud's Grafana shows only its own brokers (rp-aws Grafana → 2 AWS brokers; rp-gcp → 2 GCP brokers; rp-azure → 1 Azure broker). |
-| **Demo A leader migration aws → gcp → aws** | **Redpanda Ops Dashboard** on **rp-gcp** Grafana during the AWS cordon window | rp-aws Grafana goes dark when AWS is cordoned (its Prometheus pods are unreachable too). Open rp-gcp's Grafana and watch the 2 GCP brokers' leader count climb from 0 to ~12 during the cordon window. |
-| **Disk pressure (the Demo B blocker) on the GCP brokers** | **Redpanda Ops Dashboard** on **rp-gcp** Grafana → "Disk usage" panel | During Demo B's capacity injection, rp-gcp's Grafana is the right view — its Prometheus is local to GCP and keeps scraping even if rp-aws is cordoned. |
+| **Broker health, throughput, latency, leader counts — for THIS cloud's brokers** | **Redpanda Ops Dashboard (`<cloud>`)** on the cloud you care about | 41-panel KPI view. Per-cloud scope: rp-aws Grafana → 2 AWS brokers; rp-gcp → 2 GCP brokers; rp-azure → 1 Azure broker. The kube-context in the title tells you which one. |
+| **Demo A leader migration aws → gcp → aws** | **Redpanda Demo A** on **rp-aws** Grafana (steady state + restore) and **rp-gcp** Grafana (during the AWS cordon window) | Purpose-built for the demo: leader-count-per-broker timeseries + throughput + leadership-change rate. rp-aws Grafana goes dark when AWS is cordoned (its Prometheus pods unreachable); during that window watch rp-gcp Grafana's "Leaders for `load-test` topic" panel climb from 0 to ~12. |
+| **Demo B regional failure + capacity injection** | **Redpanda Demo B** on **rp-gcp** Grafana (primary view) and rp-azure Grafana (corroborating view) | Cluster broker count dip-and-recover, per-broker disk free/used, partition reassignment activity, storage health alert. Open it BEFORE you cordon AWS; rp-aws Grafana goes dark with its cluster, but cluster-wide gauges (broker count, URP, unavailable partitions) come through fine on the surviving Prometheuses. |
+| **Disk pressure (the Demo B blocker) on the GCP brokers** | **Redpanda Demo B** → "Disk free per broker" + "Disk used %" + "Storage health alert" panels (rp-gcp Grafana) | More focused than the Ops dashboard's general "Storage Health" view. The alert stat goes yellow at `Low Space`, red at `Degraded`. Default dashboard's storage panels also display in MB now if you want a second view. |
 | **OMB throughput on `load-test`** | **Kafka Topic Metrics** on **rp-aws** Grafana (where OMB runs) | OMB Jobs run in the `redpanda` namespace on rp-aws, so its produce/consume rate appears in rp-aws Grafana's local view of the load-test topic. |
-| **Aggregate broker-side throughput / consumer breakdown** | **Redpanda Default Dashboard** | Legacy single-pane view; per-cloud, scoped to local brokers only. |
+| **Aggregate broker-side throughput / consumer breakdown** | **Redpanda Default Dashboard** | Legacy single-pane view; per-cloud, scoped to local brokers only. Disk panels in MB. |
 | **Cross-cluster all-5-brokers aggregate** | Currently requires hopping between the 3 Grafanas, OR layering Thanos / Cortex / Mimir on top of the per-cloud Prometheuses | Out of scope for this scaffold. The per-cloud design optimizes for survivability over cross-cluster correlation. |
 | **More dashboards (consumer offsets, consumer-metrics, serverless)** | `kubectl exec` into a broker, run `rpk generate grafana-dashboard --dashboard <name>` and import the printed JSON into Grafana via "+" → Import | Available dashboard names: `operations`, `topic-metrics`, `consumer-metrics`, `consumer-offsets`, `serverless`. The first three are pre-loaded; the rest are available on-demand. |
 
@@ -481,7 +497,7 @@ After login (left nav → Dashboards (four-square icon) → Browse → **General
 > ```bash
 > GPASS=$(kubectl --context rp-aws -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 -d)
 > GURL=$(kubectl --context rp-aws -n monitoring get svc monitoring-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-> curl -s -u "admin:$GPASS" "http://$GURL/api/search?query=&type=dash-db" | jq '. | length'   # should print ~24
+> curl -s -u "admin:$GPASS" "http://$GURL/api/search?query=&type=dash-db" | jq '. | length'   # should print 5 (Ops, Default, Topic Metrics, Demo A, Demo B)
 > ```
 
 What each piece is doing under the hood:
@@ -490,7 +506,7 @@ What each piece is doing under the hood:
 |---|---|---|---|
 | **Console** | Operator-managed `Console` CR (`cluster.redpanda.com/v1alpha2`) in namespace `redpanda`, exposed via `Service: type=LoadBalancer` (NLB). The operator pulls broker / Admin API / Schema Registry endpoints + TLS + auth from the StretchCluster via `spec.cluster.clusterRef` — no per-listener wiring in the CR | n/a — read-only UI | Topics → `load-test` shows partition leadership across racks (`aws` / `gcp` / `azure`); consumer group `omb-consumer` shows lag spike + recover during failover |
 | **OMB workload** | `apache/kafka:3.8.0` Job, `kafka-producer-perf-test --throughput 7680 --record-size 4096` | `redpanda` namespace on rp-aws — leaders for the 24 partitions distribute across racks per the operator's leader-balancer | `kubectl logs -f job/omb-producer` shows per-5s `records sent / records/sec / avg latency / max latency`. A regional cordon → \~5–30 s producer stall → return to \~7680 records/sec |
-| **Prometheus + Grafana** | `prometheus-community/kube-prometheus-stack`, namespace `monitoring`, Grafana exposed via NLB | scrapes `redpanda.redpanda.svc.cluster.local:9644/public_metrics` (Endpoints SD), reaches all 5 brokers thanks to flat-mode EndpointSlices + Cilium ClusterMesh | Dashboards → Redpanda → "Kubernetes Redpanda" — produce/consume MB/s, p50/p95/p99 latency, leader count by rack, URP / leader-elections panels light up during region failover |
+| **Prometheus + Grafana** | `prometheus-community/kube-prometheus-stack`, namespace `monitoring`, Grafana exposed via NLB. **One stack per cloud** — each Prometheus scrapes only its local cluster's broker pods via the `redpanda-brokers` PodMonitor (port `admin` /`public_metrics`), so observability survives a peer-cloud outage. | per-cloud broker pods only | Open the cloud-branded **Redpanda Demo A** dashboard for the leader-flip headline visual; **Redpanda Ops Dashboard (`<cloud>`)** for KPIs (throughput, p50/p95/p99 latency, leader transfer rate, URP, storage health). Default dashboard = aggregate broker view with disk panels in MB. |
 
 The OMB target rate is 30 MB/s with 4 KiB records — see [`omb/README.md`](omb/README.md) for the rate-tuning matrix if you want a different number, and the same notes on stopping / re-applying the Jobs.
 
@@ -627,8 +643,10 @@ If you see something like `4 2 / 4 3 / 4 4` mid-window, that's the leader balanc
 |---|---|---|
 | **Console** → Topics → `leader-pinning-demo` → Partitions | The leader column for every partition | Flips from broker IDs in rack=aws (step 2) to rack=gcp (step 4), then back to rack=aws (step 5) |
 | **Console** → Topics → `load-test` → Consumer Groups → `omb-consumer` | Lag column | \~0 in steady state; spikes during the cordon window; drains back to \~0 once leaders relocate |
-| **Grafana** → Redpanda → "Kubernetes Redpanda" → throughput panels | Per-rack produce / consume MB/s | Sustained \~30 MB/s with a brief dip during leader re-election |
-| **Grafana** → same dashboard → leader-count panels | Leader count by rack | Steps from `aws=12, gcp=0, azure=0` to `aws=0, gcp=12, azure=0` and back |
+| **Grafana (rp-aws)** → Redpanda → **Demo A** → "Leaders for `load-test` topic (this cloud)" | Local broker leader count | Drops from ~12 → 0 the moment AWS is cordoned (the panel itself goes to *No data* once Prometheus targets DOWN), then returns to ~12 after restore. |
+| **Grafana (rp-gcp)** → Redpanda → **Demo A** → "Leaders for `load-test` topic (this cloud)" | Local broker leader count | Mirror image — climbs from 0 → ~12 across the 2 GCP brokers during the cordon window, drops back to 0 after restore. **This is the headline visual.** |
+| **Grafana (any cloud)** → Redpanda → **Demo A** → "Kafka throughput per broker" | Bytes/sec per local broker | Stays ~30 MB/s aggregate across the demo (with a 5–30 s notch during leader migration) — proof that traffic kept flowing. |
+| **Grafana (any cloud)** → Redpanda → **Demo A** → "Leadership transfer rate per broker" | Transfers per second | Quiet at steady state; visible spike on cordon and again on restore. |
 | **`kubectl logs -f job/omb-producer`** | Per-5s `records sent / records/sec / avg latency / max latency` | Throughput pauses for \~5–30 s during leader migration, then returns to \~7680 records/sec |
 
 **Step 5 — restore AWS and watch leaders return**
@@ -641,7 +659,20 @@ for N in $(kubectl --context rp-aws get nodes -o name); do
 done
 ```
 
-Brokers rejoin (\~60 s), partitions catch up, the leader balancer moves leaders back to AWS (rank 1 in `ordered_racks`). After \~2 min:
+Brokers rejoin (\~60 s) and one or two leaders trickle back to AWS, but **under sustained OMB load the automatic leader rebalance stalls** because the cross-cloud VPN can't keep up with `30 MB/s × RF=5` of replication lag — the balancer reads "cluster has 22 under-replicated partitions, defer leader moves" and waits indefinitely.
+
+**Force the rest back via the admin API** (validated 2026-05-04 v4 e2e) — works because `leader-pinning-demo` itself has zero traffic so its replicas are caught up; only `load-test` is URP. The API call has to follow the 307 redirect to reach the partition's current leader:
+
+```bash
+for p in $(seq 0 11); do
+  target=$((p % 2))   # alternate between AWS broker 0 and broker 1
+  kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
+    curl -sS -L -o /dev/null -w "p=$p target=$target http=%{http_code}\n" \
+    -X POST "http://localhost:9644/v1/partitions/kafka/leader-pinning-demo/$p/transfer_leadership?target=$target"
+done
+```
+
+After the transfers:
 
 ```bash
 kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
@@ -655,9 +686,11 @@ kubectl --context rp-aws -n redpanda exec redpanda-rp-aws-0 -c redpanda -- \
 
 Console / Grafana show the leader-count panel flip back to `aws=12, gcp=0, azure=0`. The `omb-consumer` group's lag (which spiked during the cordon window) drains within seconds — that's the visible end-to-end signal that the cluster rode through a full-cloud outage with continuous client traffic.
 
+> **Why the transfer-leadership workaround is needed cross-cloud, not same-cloud.** Same-cloud Demo A ran without this — replicas rebuild within seconds over local AZ links and the auto-rebalance fires. Cross-cloud, the load-test topic's replicas are persistently behind by enough that the cluster stays in `under_replicated_partitions` health for as long as OMB runs at 30 MB/s. The leader balancer's "wait for cluster healthy" guard then never opens. Same-cloud beta gets `Healthy: true` between bursts; cross-cloud beta does not under load. Pausing OMB before step 5 also works as an alternative, but the manual transfer is the cheaper demo-friendly path.
+
 **Caveats observed in this scaffold:**
 
-- **Leader balancer stalls during under-replicated periods.** When a whole cloud's brokers go away, the balancer pauses while the cluster is recovering, then resumes once partitions are re-replicated. Expect 30–90 s of "leaders not yet redistributed" while replicas are being rebuilt elsewhere.
+- **Leader balancer waits on cluster health.** Under sustained cross-cloud OMB load the cluster stays in `under_replicated_partitions` indefinitely, so the auto-leader-rebalance gate never opens after AWS rejoins. Use the `transfer_leadership` admin API loop above (or pause OMB before step 5).
 - **EKS NLBs may be reaped during long cordons.** If you keep AWS cordoned for more than \~10–15 min, the AWS Load Balancer Controller (whose pods are also Pending on cordoned nodes) stops reconciling, and any LB it owns can be reaped by the cloud LB controller. The `rp-aws-multicluster-peer` LB is the one that matters — if it's gone, the rp-gcp / rp-azure operator pods drop their AWS-peer connection until you uncordon and the LB is recreated. For Demo A's short cycle this doesn't bite; it does for Demo B (which deliberately leaves AWS down).
 - **`rpk redpanda admin brokers list` may briefly show un-affected brokers as `IS-ALIVE=false`.** During transitions, cross-cloud heartbeats can flap. Confirm against `rpk cluster health` (`Nodes down:` field), which uses the controller's authoritative view — except when the controller itself sits across a > 100 ms RTT line (see the Azure caveat above).
 - **Within-rack leader split lands at 4/8 not 6/6 after AWS recovery.** The `ordered_racks` rack-priority semantics work (12 leaders return to AWS), but the leader balancer doesn't always even out across the two AWS-rack brokers. `rpk cluster partitions transfer-leadership <topic> --partition <pid>:<broker>` works to nudge specific partitions, but the balancer may move them back. Not a blocker — the rack-pin objective is met. Filing a follow-up issue makes sense if intra-rack evenness becomes a hard requirement.
@@ -804,13 +837,48 @@ kubectl --context rp-gcp -n redpanda patch nodepool rp-gcp \
 
 The operator decommissions the two scale-up brokers (5, 6) gracefully, replicas migrate to the AWS brokers (7, 8), and the cluster returns to the original 2/2/1 layout (just with different broker IDs).
 
-### Known issues for cross-cloud Demo B (validated 2026-05-03)
+**Watch it in Console / Grafana while the demo runs.**
+
+| Surface | What to point at | What to expect |
+|---|---|---|
+| **Grafana (rp-gcp)** → Redpanda → **Demo B** → "Cluster broker count" | Cluster-wide gauge | Steps from `5` → `3` (cordon) → `5` (after autodecom + GCP scale-up) → `7` (AWS uncordon) → `5` (after the GCP drain). The full Demo B narrative in one panel. |
+| **Grafana (rp-gcp)** → Demo B → "Disk free per broker (this cloud, MB)" | Per-pod disk free | New pods `redpanda-rp-gcp-2` / `redpanda-rp-gcp-3` appear at the NodePool patch; their disk-free curves drop as autobalancer re-replicates the AWS brokers' partitions onto them. |
+| **Grafana (rp-gcp)** → Demo B → "Partitions moving TO node" | Per-pod movement count | Quiet at steady state. Spikes after `IS-ALIVE=true` on the new brokers, drains to 0 once reassignment finishes. |
+| **Grafana (any cloud)** → Demo B → "Storage health alert" | OK / Low Space / Degraded | Should stay green (`OK`) end-to-end. If it turns yellow you've hit the original Demo B blocker — check the Disk free panel for the offending pod. |
+| **Grafana (any cloud)** → Demo B → "Unavailable partitions (cluster-wide)" | Should stay 0 | RF=5 with 2 brokers down still has majority quorum across surviving racks. If this goes > 0, you've lost availability — escalate before continuing the demo. |
+| **Console (rp-gcp)** → Brokers | Broker membership | AWS brokers turn red/unreachable at cordon, then disappear from the list at autodecom (~T+15 min), then reappear with new IDs at uncordon. |
+| **`rpk cluster partitions balancer-status`** (from rp-azure) | `Status` field | `stalled` immediately after cordon → `in_progress` once new GCP brokers are alive → `idle` once reassignment finishes. The Demo B dashboard's *Partitions moving* panels visualize the same transitions in real time. |
+
+### Known issues for cross-cloud Demo B (validated 2026-05-04 v4)
 
 Inherited from same-cloud Demo B and confirmed cross-cloud:
 
 - **`partition_balancer/status` reports the wrong `unavailable_nodes` set when the controller leader sits >100 ms from any surviving broker.** Mitigation: keep the regions in the same continent (the default `us-east-1` / `us-east1` / `eastus` triple is fine).
 - **Under-replicated topics show in *every* topic's describe**, including internal ones (`__consumer_offsets`, transaction state). That's expected — RF=5 internal topics are also affected.
 - **Auto-decommission only fires on brokers that have been continuously unreachable for `autodecom_timeout`.** Patching the NodePool replicas back up before the timeout fires means the original brokers (0, 1) come back instead of being decommissioned, which leaves you with 7 active brokers and no auto-cleanup. Time the demo accordingly.
+
+**New cross-cloud findings from 2026-05-04 v4 e2e:**
+
+- **Autodecom is gated on the balancer being able to make progress — by design.** With our 5-broker layout (rp-aws=2, rp-gcp=2, rp-azure=1), some `__consumer_offsets` partitions get RF=3 placed across rp-aws's two brokers + one peer. When AWS is cordoned, those 2-of-3 replicas become unavailable → no quorum to elect a new leader → the partition is stuck leaderless → the autobalancer's `node_autodecommission_timeout` waits indefinitely. This is intentional safety in core Redpanda's `partition_balancer_backend` — it won't formally decommission a broker until the cluster can absorb its replicas elsewhere. The cross-cloud UX consequence is that the demo's "autodecom fires at T+15min" beat doesn't visibly land; you have to push through manually with `rpk admin brokers decommission --skip-liveness-check`, accepting that you're overriding the safety check (the manual decom won't actually free the no-quorum replicas either, but it transitions brokers into `MEMBERSHIP: draining` so the demo can proceed). **Workaround:**
+  ```bash
+  for id in 0 1; do
+    kubectl --context rp-gcp -n redpanda exec redpanda-rp-gcp-0 -c redpanda -- \
+      rpk redpanda admin brokers decommission "$id" --skip-liveness-check
+  done
+  ```
+  This puts brokers in `MEMBERSHIP: draining` state. Decom completes the moment AWS is uncordoned and quorum is restored — without that, the draining sits stuck on the no-quorum partitions. This was reproducible across 2 v4 attempts. (Same-cloud Demo B doesn't hit this because intra-AZ replication is fast enough that internal topics regain replicas quickly; cross-cloud replication lag from sustained OMB load keeps the cluster persistently in `under_replicated_partitions` state.)
+
+- **AWS brokers rejoin with their ORIGINAL broker IDs (0, 1), not new IDs (7, 8).** When AWS pods come back from cordon, they read their existing PVCs (which still contain the old broker identity) and rejoin as 0, 1. Because we already pushed those through `decommission` in the previous step, they land in `MEMBERSHIP: draining` immediately. The decom completes once the brokers are alive again (quorum restored), but the README's expected end-state of "AWS brokers come back as 7, 8" requires a PVC wipe.
+  ```bash
+  # Demo B step 6 prereq if you actually want fresh broker IDs (7, 8):
+  kubectl --context rp-aws -n redpanda scale sts redpanda-rp-aws --replicas=0
+  kubectl --context rp-aws -n redpanda delete pvc \
+    datadir-redpanda-rp-aws-0 datadir-redpanda-rp-aws-1
+  kubectl --context rp-aws -n redpanda scale sts redpanda-rp-aws --replicas=2
+  ```
+  After fresh PVCs, brokers join with new IDs allocated by the controller. Note: **only one AWS broker reliably rejoined as a new ID** in the 2026-05-04 v4 attempt — broker 7 (rp-aws-1) succeeded; broker 9 (rp-aws-0) repeatedly hit `bad_rejoin: trying to rejoin with same ID and UUID as a decommissioned node` or hung in a "registered locally but can't reach controller" state with `rpc::errc::missing_node_rpc_client` log spam. Worked around by repeatedly wiping the PVC; even then, the second broker stayed unhealthy. The headline Demo B narrative (cordon → balancer-stall → capacity-injection → reassignment → uncordon) is fully observable through step 5 even when step 6 is blocked by this re-join glitch.
+
+- **Step 6 (drain GCP NodePool 4 → 2) requires 7 active brokers** (the original 5 + 2 new GCP). If you skip the PVC-wipe workaround above and have only 6 active brokers (one AWS broker stuck), patching `replicas: 2` would decom 2 GCP brokers and leave you with 4 active — RF=5 topics would fail. Demo B's "drain temporary capacity" step is therefore **conditional on a clean step-5 rejoin**, which the v4 run could not consistently reproduce cross-cloud.
 
 Cross-cloud-specific:
 
