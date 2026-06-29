@@ -41,6 +41,16 @@ TF_DIRS=(
   "$REPO_ROOT/azure/terraform"
 )
 
+# The shadow cluster (rp-shadow EKS + VPC peering to rp-aws) is an optional
+# add-on (shadow/terraform/). It is NOT in CONTEXTS / TF_DIRS because it must
+# be torn down in a specific order: BEFORE aws/terraform, since shadow/
+# terraform owns the VPC peering connection plus the routes + node-SG rule it
+# wrote into the rp-aws VPC, and it reads rp-aws's terraform state. Destroying
+# rp-aws first would orphan the peering (blocking the rp-aws VPC delete) and
+# leave shadow/terraform's data sources unresolvable.
+SHADOW_CTX=${SHADOW_CTX:-rp-shadow}
+SHADOW_TF_DIR="$REPO_ROOT/shadow/terraform"
+
 AWS_REGIONS=(${AWS_REGIONS:-us-east-1})
 AZURE_REGION=${AZURE_REGION:-eastus}
 
@@ -129,6 +139,28 @@ tf_destroy() {
   popd >/dev/null
 }
 
+# Sweep orphaned k8s-managed security groups (the SGs that AWS' in-tree
+# cloud provider / LBC create alongside LoadBalancer Services). Factored
+# out so it can run BOTH pre-destroy and post-destroy: a k8s-elb-* SG can't
+# be deleted while its ELB is still asynchronously deleting, so a single
+# pre-destroy pass leaves it behind and the VPC delete then 400s with
+# `DependencyViolation`. Running it AGAIN post-destroy — once the ELBs are
+# fully gone — clears the stragglers before the final destroy pass. Drift
+# caught 2026-06-29: the shadow-link Kafka proxy's internal ELB (k8s-elb-*)
+# left an orphan SG that blocked the rp-aws VPC delete.
+sweep_k8s_sgs() {
+  local r=$1
+  log "$r: sweep orphan k8s-* security groups"
+  for sg in $(aws ec2 describe-security-groups --region "$r" \
+    --filters 'Name=group-name,Values=k8s-redpanda*,k8s-traffic*,k8s-clusterm*,k8s-rpaws*,k8s-elb*' \
+    --query 'SecurityGroups[].GroupId' --output text 2>/dev/null); do
+    # Clear cross-referencing ingress rules first so SGs that reference each
+    # other can be deleted (best-effort), then delete the SG.
+    aws ec2 delete-security-group --region "$r" --group-id "$sg" 2>/dev/null \
+      && log "  deleted sg: $sg" || true
+  done
+}
+
 # AWS orphan sweep — same logic as the same-cloud aws/scripts/teardown.sh.
 # Pre-destroy AWS sweep — runs BEFORE per-cloud terraform destroy.
 #
@@ -214,13 +246,7 @@ aws_pre_destroy_sweep() {
       aws ec2 delete-network-interface --region "$r" --network-interface-id "$eni" 2>/dev/null \
         && log "  deleted eni: $eni" || true
     done
-    log "$r: sweep orphan k8s-* security groups"
-    for sg in $(aws ec2 describe-security-groups --region "$r" \
-      --filters 'Name=group-name,Values=k8s-redpanda*,k8s-traffic*,k8s-clusterm*,k8s-rpaws*,k8s-elb*' \
-      --query 'SecurityGroups[].GroupId' --output text 2>/dev/null); do
-      aws ec2 delete-security-group --region "$r" --group-id "$sg" 2>/dev/null \
-        && log "  deleted sg: $sg" || true
-    done
+    sweep_k8s_sgs "$r"
   done
 }
 
@@ -242,6 +268,12 @@ aws_post_destroy_sweep() {
       aws ec2 delete-customer-gateway --region "$r" --customer-gateway-id "$cgw" 2>/dev/null \
         && log "  deleted cgw: $cgw" || true
     done
+    # Second SG sweep: by now the ELBs deleted in the pre-destroy sweep are
+    # fully gone, so any k8s-elb-* SG that couldn't be deleted earlier (still
+    # attached to a deleting ELB) is now removable. This runs before the
+    # final terraform destroy pass, so the VPC delete no longer hits
+    # DependencyViolation on a leftover LB security group.
+    sweep_k8s_sgs "$r"
   done
 }
 
@@ -304,6 +336,32 @@ for ctx in "${CONTEXTS[@]}"; do force_finalize_ns  "$ctx"; done
 
 log "=== disable clustermesh on each cluster ==="
 for ctx in "${CONTEXTS[@]}"; do clustermesh_disable "$ctx"; done
+
+# === shadow tier teardown (optional add-on) — BEFORE any per-cloud destroy ===
+# Destroy the shadow cluster + its VPC peering to rp-aws first. shadow/
+# terraform owns the peering connection and the routes + node-SG rule it
+# wrote into the rp-aws VPC; those must go before aws/terraform's VPC delete,
+# and the shadow stack reads rp-aws state (so rp-aws must still exist here).
+if [[ -d "$SHADOW_TF_DIR" ]] && (cd "$SHADOW_TF_DIR" && terraform state list >/dev/null 2>&1); then
+  log "=== shadow teardown (rp-shadow + peering) ==="
+  # Best-effort: delete the shadow link + uninstall the shadow Redpanda so
+  # PVCs/LBs release before the cluster is destroyed.
+  SHADOW_POD=$(kubectl --context "$SHADOW_CTX" -n redpanda get pod \
+    -l app.kubernetes.io/name=redpanda -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+  if [[ -n "$SHADOW_POD" ]]; then
+    kubectl --context "$SHADOW_CTX" -n redpanda exec "$SHADOW_POD" -c redpanda -- \
+      rpk shadow delete stretch-to-shadow-dr --no-confirm 2>/dev/null | sed 's/^/  /' || true
+  fi
+  helm --kube-context "$SHADOW_CTX" uninstall redpanda -n redpanda 2>/dev/null || true
+  kubectl --context "$SHADOW_CTX" delete namespace redpanda --ignore-not-found 2>/dev/null || true
+  # Sweep the shadow VPC's own k8s LBs/ENIs (mirrors the rp-aws sweep) so the
+  # shadow VPC delete doesn't hang, then prune k8s state + destroy.
+  aws_pre_destroy_sweep "${AWS_REGIONS[@]}"
+  tf_state_rm_k8s "$SHADOW_TF_DIR"
+  tf_destroy      "$SHADOW_TF_DIR"
+else
+  log "no shadow/terraform state — skipping shadow teardown"
+fi
 
 # IMPORTANT ordering: the cross-cloud VPN connections must be destroyed
 # BEFORE the per-cloud TFs. The VPN module holds the
@@ -444,6 +502,6 @@ tf_destroy "$REPO_ROOT/gcp/terraform" -var "project_id=$GCP_PROJECT"
 tf_destroy "$REPO_ROOT/azure/terraform"
 
 log "=== kubectl cleanup ==="
-clean_kubectl 'rp-(aws|gcp|azure)$'
+clean_kubectl 'rp-(aws|gcp|azure|shadow)$'
 
 log "done"
